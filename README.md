@@ -44,21 +44,109 @@ Make sure that all datasets you want to train on are under the same root directo
 
 -------
 ## Training
-To train policies, update `DATA_PATH`, `EXP_LOG_PATH`, and `EXP_NAMES` in `robomimic/scripts/config_gen/droid_runs_language_conditioned_rlds.py` and then run:
 
-`python robomimic/scripts/config_gen/droid_runs_language_conditioned_rlds.py --wandb_proj_name <WANDB_PROJ_NAME>`
+### Step 1: Configure Training Parameters
 
-This will generate a python command that can be run to launch training. You can also update other training parameters within `robomimic/scripts/config_gen/droid_runs_language_conditioned_rlds.py`. Please see the `robomimic` documentation for more information on how `robomimic` configs are defined. The three
-most important parameters in this file are:
+Edit `robomimic/scripts/config_gen/droid_runs_language_conditioned_rlds.py` and update the following key parameters:
 
-- `DATA_PATH`: This is the directory in which all RLDS datasets were prepared.
-- `EXP_LOG_PATH`: This is the path at which experimental data (eg. policy checkpoints) will be stored.
-- `EXP_NAMES`: This defines the name of each experiment (as will be logged in `wandb`), the RLDS datasets corresponding to that experiment, and the desired sample weights between those datasets. See `robomimic/scripts/config_gen/droid_runs_language_conditioned_rlds.py` for a template on how this should be formatted.
+```python
+# Line 13: Path to your RLDS datasets directory
+DATA_PATH = "/workspace/dataset/droid_100"    # Update this path
 
-During training, we use a [_shuffle buffer_](https://www.tensorflow.org/api_docs/python/tf/data/Dataset#shuffle) to ensure that training samples are properly randomized. It is important to use a large enough shuffle buffer size.
-The default `shuffle_buffer_size` is set to `500000`, but you may need to reduce this based on your RAM availability. For best results, we recommend using `shuffle_buffer_size >= 100000` if possible. All polices were trained on a single NVIDIA A100 GPU.
+# Line 14: Path where training logs and checkpoints will be saved
+EXP_LOG_PATH = "/workspace/droid_policy_learning/logs"  # Update this path
 
-To specify your information for Weights and Biases logging, make sure to update the `WANDB_ENTITY` and `WANDB_API_KEY` values in `robomimic/macros.py`.
+# Lines 15-22: Define your experiments and datasets
+EXP_NAMES = OrderedDict([
+    ("droid", {
+        "datasets": ["droid"],           # Dataset names (should match folder names in DATA_PATH)
+        "sample_weights": [1]            # Sample weights for each dataset
+    })
+])
+```
+
+**Important Parameters:**
+- `DATA_PATH`: Directory containing all RLDS datasets. Each dataset should be in its own subdirectory (e.g., `DATA_PATH/droid/`).
+- `EXP_LOG_PATH`: Directory where training logs, checkpoints, and experiment outputs will be stored.
+- `EXP_NAMES`: Defines experiment configurations:
+  - Keys are experiment names (as logged in wandb)
+  - `datasets`: List of dataset folder names in `DATA_PATH`
+  - `sample_weights`: Relative sampling weights for each dataset (e.g., `[1, 2]` means second dataset is sampled twice as often)
+
+**For Docker Users:**
+- If using the provided Docker setup, datasets are mounted at `/workspace/dataset/`
+- Project code is at `/workspace/droid_policy_learning/`
+- Default paths in the config file are already set for Docker environment
+- **Troubleshooting**: If you encounter GPU access issues or TensorFlow warnings, see [Docker Troubleshooting Guide](docs/docker_troubleshooting.md)
+
+### Step 2: Generate Training Configuration
+
+Run the config generator script to create training configurations:
+
+```bash
+cd /workspace/droid_policy_learning  # If in Docker container
+python robomimic/scripts/config_gen/droid_runs_language_conditioned_rlds.py \
+    --wandb_proj_name <YOUR_WANDB_PROJECT_NAME> \
+    --env droid \
+    --mod <MODALITY>  # e.g., "rgb" for vision-based policies
+```
+
+This will:
+1. Generate JSON config files for each experiment
+2. Create a bash script (default: `~/tmp/tmpp.sh`) with training commands
+
+**Example:**
+```bash
+python robomimic/scripts/config_gen/droid_runs_language_conditioned_rlds.py \
+    --wandb_proj_name droid_policy_training \
+    --env droid \
+    --mod rgb
+```
+
+### Step 3: Launch Training
+
+**Option A: Use the generated script**
+```bash
+bash ~/tmp/tmpp.sh
+```
+
+**Option B: Run training directly**
+The generated script contains commands like:
+```bash
+python /workspace/droid_policy_learning/robomimic/scripts/train.py \
+    --config /path/to/generated/config.json
+```
+
+You can also run this command directly or modify it as needed.
+
+### Additional Training Parameters
+
+You can customize training by modifying parameters in `droid_runs_language_conditioned_rlds.py`:
+
+- **Batch size** (line 74): `values=[128]` - Adjust based on GPU memory
+- **Image resolution** (line 203): `values=[[128, 128]]` - Input image size
+- **Number of epochs** (line 53): `values=[100000]` - Training duration
+- **Shuffle buffer size** (line 67): `values=[500000]` - Dataset shuffling (reduce if low RAM)
+- **Camera selection** (line 214): Choose which cameras to use
+- **Observation modalities** (line 274): Configure low-dim and image observations
+
+See the `robomimic` documentation for more information on config parameters.
+
+### Training Tips
+
+- **Shuffle Buffer Size**: We use a [_shuffle buffer_](https://www.tensorflow.org/api_docs/python/tf/data/Dataset#shuffle) to ensure training samples are properly randomized. The default is `500000`, but reduce this if you have limited RAM. For best results, use `shuffle_buffer_size >= 100000` if possible.
+
+- **GPU Requirements**: All policies were trained on a single NVIDIA A100 GPU. You may need to adjust batch size and other parameters for different GPU configurations.
+
+- **Weights and Biases (wandb) Logging**: 
+  - Update `WANDB_ENTITY` and `WANDB_API_KEY` in `robomimic/macros.py`
+  - Or set environment variables: `export WANDB_ENTITY=your_entity` and `export WANDB_API_KEY=your_key`
+  - Training metrics, checkpoints, and visualizations will be logged to wandb
+
+- **Monitoring Training**: 
+  - Check wandb dashboard for real-time training metrics
+  - Checkpoints are saved to `EXP_LOG_PATH/<experiment_name>/models/`
+  - Training logs are saved to `EXP_LOG_PATH/<experiment_name>/logs/`
 
 We also provide a stand-alone example to load data from DROID [here](examples/droid_dataloader.py).
 

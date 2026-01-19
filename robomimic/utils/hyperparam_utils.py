@@ -289,6 +289,11 @@ class ConfigGenerator(object):
         Generates a bash script to run the experiments that correspond to
         the input jsons.
         """
+        # Ensure the directory exists before writing the file
+        script_dir = os.path.dirname(self.script_file)
+        if script_dir and not os.path.exists(script_dir):
+            os.makedirs(script_dir, exist_ok=True)
+        
         with open(self.script_file, 'w') as f:
             f.write("#!/bin/bash\n\n")
             for path in json_paths:

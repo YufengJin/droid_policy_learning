@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  droid-dev-gui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: droid-policy:latest
+    container_name: droid-dev-gui
+    
+    environment:
+      # X11 转发配置
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - PYTHONUNBUFFERED=1
+    
+    volumes:
+      # 挂载 droid_policy_learning 项目代码
+      - ..:/workspace/droid_policy_learning
+      # 挂载 DROID 数据集
+      - ~/localdisk/droid/droid_100:/workspace/dataset/droid_100
+      # 挂载 X11 Socket 以支持 GUI 显示
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # 挂载 Xauthority 以通过权限验证
+      - ${HOME}/.Xauthority:/root/.Xauthority:rw
+      # 挂载 Hugging Face cache 以避免重复下载模型
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    
+    # 使用 Host 网络模式通常能最方便地解决 X11 通信问题
+    # 同时也能最大化网络性能（大模型训练推荐）
+    network_mode: host
+    
+    # IPC 主机模式：提供无限制共享内存访问，LLM 训练必需
+    ipc: host
+    
+    # PID 主机模式：允许监控工具（nvtop, htop, wandb）正确显示系统资源
+    pid: host
+    
+    command: tail -f /dev/null
+    
+    # 资源预留配置 (Docker Compose v2+ 标准写法)
+    deploy:
+      resources:
+        # 不设置 limits 表示不限制内存，使用主机所有可用内存（大模型训练需要）
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+    
+    # 系统资源限制优化
+    ulimits:
+      # 增加文件描述符限制（大模型训练可能需要打开大量文件）
+      nofile:
+        soft: 65536
+        hard: 65536
+      # 增加进程数限制
+      nproc: 65536
+      # 无限制内存锁定：CUDA Pinned Memory (DMA transfers) 必需
+      memlock: -1
+      # 增加栈大小：防止深度递归栈导致的段错误
+      stack: 67108864

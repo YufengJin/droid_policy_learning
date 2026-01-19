@@ -10,14 +10,14 @@ from collections import OrderedDict
 # Note: Assumes naming of dataset in "datasets" for the full DROID dataset is
 # droid
 
-DATA_PATH = ""    # UPDATE WITH PATH TO RLDS DATASETS
-EXP_LOG_PATH = "" # UPDATE WITH PATH TO DESIRED LOGGING DIRECTORY
+DATA_PATH = "/workspace/dataset"    # UPDATE WITH PATH TO RLDS DATASETS
+EXP_LOG_PATH = "/workspace/droid_policy_learning/logs" # UPDATE WITH PATH TO DESIRED LOGGING DIRECTORY
 EXP_NAMES = OrderedDict(
     [
         # Note: you can add co-training dataset here appending
         # a new dataset to "datasets" and adjusting "sample_weights"
         # accordingly
-        ("droid", {"datasets": ["droid"],
+        ("droid", {"datasets": ["droid_100"],
                    "sample_weights": [1]})                                    
     ])
 
@@ -64,7 +64,7 @@ def make_generator_helper(args):
         key="train.shuffle_buffer_size",
         name="",
         group=-1,
-        values=[500000],
+        values=[50000],
     )
 
     generator.add_param(
