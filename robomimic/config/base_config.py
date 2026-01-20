@@ -144,7 +144,9 @@ class BaseConfig(Config):
         """
 
         # Path to hdf5 dataset to use for training
-        self.train.data = None                                      
+        self.train.data = None                                     
+        # Path to RLDS datasets (used when train.data_format == "droid_rlds")
+        self.train.data_path = ""
 
         # Write all results to this directory. A new folder with the timestamp will be created
         # in this directory, and it will contain three subfolders - "log", "models", and "videos".
@@ -198,6 +200,16 @@ class BaseConfig(Config):
             "rewards", 
             "dones",
         )
+
+        # RLDS-specific settings (used by DROID pipeline)
+        self.train.shuffle_buffer_size = 100000
+        self.train.view_dropout_prob = 0.0
+        self.train.sample_weights = [1]
+        self.train.dataset_names = [""]
+        self.train.subsample_length = 100
+        self.train.num_parallel_calls = 200
+        self.train.traj_transform_threads = 48
+        self.train.traj_read_threads = 48
 
         self.train.action_keys = ["actions"]
         self.train.action_shapes = [(1, 1)]

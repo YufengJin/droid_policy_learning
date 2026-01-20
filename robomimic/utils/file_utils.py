@@ -227,6 +227,8 @@ def get_shape_metadata_from_dataset(dataset_path, batch, action_keys, all_obs_ke
         for k in [
             "robot_state/cartesian_position",
             "robot_state/gripper_position",
+            "camera/image/wrist_image_left",
+            "camera/image/hand_camera_left_image",
             "camera/image/varied_camera_1_left_image",
             # "camera/image/varied_camera_1_right_image",
             "camera/image/varied_camera_2_left_image",
@@ -237,10 +239,21 @@ def get_shape_metadata_from_dataset(dataset_path, batch, action_keys, all_obs_ke
                 if len(initial_shape) == 0:
                     initial_shape = (1,)
 
-                all_shapes[k] = ObsUtils.get_processed_shape(
-                    obs_modality=ObsUtils.OBS_KEYS_TO_MODALITIES[k],
-                    input_shape=initial_shape,
-                )
+                obs_modality = ObsUtils.OBS_KEYS_TO_MODALITIES[k]
+                if obs_modality == "rgb" and len(initial_shape) >= 3:
+                    valid_channels = set(ObsUtils.VALID_IMAGE_CHANNEL_DIMS) | {6}
+                    if (initial_shape[0] in valid_channels) and (initial_shape[-1] not in valid_channels):
+                        all_shapes[k] = list(initial_shape)
+                    else:
+                        all_shapes[k] = ObsUtils.get_processed_shape(
+                            obs_modality=obs_modality,
+                            input_shape=initial_shape,
+                        )
+                else:
+                    all_shapes[k] = ObsUtils.get_processed_shape(
+                        obs_modality=obs_modality,
+                        input_shape=initial_shape,
+                    )
 
         shape_meta = {'ac_dim': batch["actions"].shape[-1]}
     else:

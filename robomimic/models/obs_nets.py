@@ -309,7 +309,7 @@ class ObservationEncoder(Module):
         else:
             raise NotImplementedError("Unsupported fuser")
 
-    def forward(self, obs_dict):
+    def forward(self, obs_dict, lang_cond=None):
         """
         Processes modalities according to the ordering in @self.obs_shapes. For each
         modality, it is processed with a randomizer (if present), an encoder
@@ -354,7 +354,14 @@ class ObservationEncoder(Module):
                         x = rand.forward_in(x)
             # maybe process with obs net
             if self.obs_nets[k] is not None:
-                x = self.obs_nets[k](x)
+                module = self.obs_nets[k]
+                if lang_cond is not None:
+                    try:
+                        x = module(x, lang_cond=lang_cond)
+                    except TypeError:
+                        x = module(x)
+                else:
+                    x = module(x)
                 if self.activation is not None:
                     x = self.activation(x)
             # maybe process encoder output with randomizer
@@ -562,7 +569,7 @@ class ObservationGroupEncoder(Module):
                 nn.Linear(512, self.out_size)
             )
 
-    def forward(self, **inputs):
+    def forward(self, lang_cond=None, **inputs):
         """
         Process each set of inputs in its own observation group.
 
@@ -589,7 +596,7 @@ class ObservationGroupEncoder(Module):
         for obs_group in self.observation_group_shapes:
             # pass through encoder
             outputs.append(
-                self.nets[obs_group].forward(inputs[obs_group])
+                self.nets[obs_group].forward(inputs[obs_group], lang_cond=lang_cond)
             )
 
         combo = torch.cat(outputs, dim=-1)

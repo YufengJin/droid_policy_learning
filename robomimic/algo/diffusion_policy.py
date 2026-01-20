@@ -1,16 +1,13 @@
-"""
-Implementation of Diffusion Policy https://diffusion-policy.cs.columbia.edu/ by Cheng Chi
-"""
 from typing import Callable, Union
 import math
 from collections import OrderedDict, deque
 from packaging.version import parse as parse_version
 import random
+import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-# requires diffusers==0.11.1
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.training_utils import EMAModel
@@ -30,9 +27,62 @@ import os
 
 
 from transformers import AutoTokenizer, AutoModel
-tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
-lang_model = AutoModel.from_pretrained("distilbert-base-uncased", torch_dtype=torch.float16)
-lang_model.to('cuda')
+
+try:
+    from transformers.utils import hub as _transformers_hub
+    from huggingface_hub import RemoteEntryNotFoundError
+
+    _orig_list_repo_templates = _transformers_hub.list_repo_templates
+
+    def _safe_list_repo_templates(*args, **kwargs):
+        try:
+            return _orig_list_repo_templates(*args, **kwargs)
+        except RemoteEntryNotFoundError:
+            return []
+
+    _transformers_hub.list_repo_templates = _safe_list_repo_templates
+except Exception:
+    pass
+
+_tokenizer = None
+_lang_model = None
+_lang_model_device = None
+
+
+def get_tokenizer():
+    global _tokenizer
+    if _tokenizer is None:
+        try:
+            _tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+        except Exception:
+            _tokenizer = AutoTokenizer.from_pretrained(
+                "distilbert-base-uncased",
+                local_files_only=True,
+            )
+    return _tokenizer
+
+
+def get_lang_model(device):
+    global _lang_model, _lang_model_device
+    
+    if _lang_model is not None and _lang_model_device == device:
+        return _lang_model
+    
+    try:
+        _lang_model = AutoModel.from_pretrained(
+            "distilbert-base-uncased",
+            dtype=torch.float16,
+        )
+    except Exception:
+        _lang_model = AutoModel.from_pretrained(
+            "distilbert-base-uncased",
+            dtype=torch.float16,
+            local_files_only=True,
+        )
+    _lang_model.to(device)
+    _lang_model_device = device
+    
+    return _lang_model
 
 
 # import torch.distributed as dist
@@ -63,6 +113,21 @@ def algo_config_to_class(algo_config):
         raise RuntimeError()
 
 class DiffusionPolicyUNet(PolicyAlgo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._init_alignment_schedule()
+
+    def _init_alignment_schedule(self):
+        cfg = self.algo_config
+        self.alignment_freq_high = float(getattr(cfg, 'cleandift_alignment_freq', 1.0))
+        freq_min_cfg = getattr(cfg, 'cleandift_alignment_freq_min', self.alignment_freq_high)
+        self.alignment_freq_low = float(max(0.0, min(self.alignment_freq_high, freq_min_cfg)))
+        self.alignment_freq_drop_ratio = float(getattr(cfg, 'cleandift_alignment_freq_drop_ratio', 0.01))
+        self.current_alignment_freq = self.alignment_freq_high
+        # Track when alignment is (re-)enabled so schedules are measured in alignment steps,
+        # not absolute training epochs (important for two-stage finetune / resume).
+        self._alignment_start_epoch = None
+
     def _create_networks(self):
         """
         Creates networks and places them into @self.nets.
@@ -91,15 +156,84 @@ class DiffusionPolicyUNet(PolicyAlgo):
             global_cond_dim=obs_dim*self.algo_config.horizon.observation_horizon
         )
 
+        # Two-stage training configuration:
+        # Stage 1: freeze encoder (backbone), train decoder (noise_pred_net)
+        # Stage 2: freeze decoder (noise_pred_net), train encoder
+        self._freeze_decoder = bool(getattr(self.algo_config, 'freeze_decoder', False))
+        if self._freeze_decoder:
+            quiet = os.environ.get("ROBOMIMIC_QUIET", "0") == "1"
+            if not quiet:
+                print(f"\n{'='*60}")
+                print(f"[DiffusionPolicy] Stage 2 Mode: FREEZE decoder (noise_pred_net)")
+                print(f"  -> noise_pred_net: FROZEN (no training)")
+                print(f"  -> obs_encoder: trained by policy loss + alignment loss")
+                print(f"  -> Goal: Train a foundation image encoder")
+                print(f"{'='*60}\n")
+            for param in noise_pred_net.parameters():
+                param.requires_grad = False
+
         # the final arch has 2 parts
-        nets = nn.ModuleDict({
-            'policy': nn.ModuleDict({
-                'obs_encoder': torch.nn.parallel.DataParallel(obs_encoder, device_ids=list(range(0,torch.cuda.device_count()))),
-                'noise_pred_net': torch.nn.parallel.DataParallel(noise_pred_net, device_ids=list(range(0,torch.cuda.device_count())))
+        # Check if we're using DDP - if so, don't use DataParallel (DDP will handle multi-GPU)
+        use_ddp = getattr(self.global_config.train, 'use_ddp', False)
+        is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+        
+        # Only use DataParallel in single-process multi-GPU mode (not DDP)
+        if (not use_ddp) and (not is_distributed) and torch.cuda.device_count() > 1:
+            # Traditional DataParallel for single-process multi-GPU
+            nets = nn.ModuleDict({
+                'policy': nn.ModuleDict({
+                    'obs_encoder': torch.nn.parallel.DataParallel(obs_encoder, device_ids=list(range(0,torch.cuda.device_count()))),
+                    'noise_pred_net': torch.nn.parallel.DataParallel(noise_pred_net, device_ids=list(range(0,torch.cuda.device_count())))
+                })
             })
-        })
+        else:
+            # DDP mode or single GPU: use plain networks (DDP will wrap them at higher level)
+            nets = nn.ModuleDict({
+                'policy': nn.ModuleDict({
+                    'obs_encoder': obs_encoder,
+                    'noise_pred_net': noise_pred_net
+                })
+            })
 
         nets = nets.float().to(self.device)
+
+        # AMP configuration (defaults controlled via training config)
+        requested_amp = bool(getattr(self.global_config.train, "use_amp", False))
+        self.use_amp = requested_amp and torch.cuda.is_available()
+        amp_dtype_cfg = str(getattr(self.global_config.train, "amp_dtype", "bfloat16")).lower()
+        self.autocast_dtype = None
+        if self.use_amp:
+            if amp_dtype_cfg == "float16":
+                self.autocast_dtype = torch.float16
+            elif amp_dtype_cfg == "bfloat16":
+                bf16_supported = False
+                is_bf16_supported = getattr(torch.cuda, "is_bf16_supported", None)
+                if callable(is_bf16_supported):
+                    try:
+                        bf16_supported = bool(is_bf16_supported())
+                    except RuntimeError:
+                        bf16_supported = False
+                if bf16_supported:
+                    self.autocast_dtype = torch.bfloat16
+                else:
+                    # Fall back to fp16 if bf16 is not available
+                    self.autocast_dtype = torch.float16
+                    if str(getattr(self.global_config.train, "amp_dtype", "")).lower() == "bfloat16":
+                        quiet = os.environ.get("ROBOMIMIC_QUIET", "0") == "1"
+                        if not quiet:
+                            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                                if torch.distributed.get_rank() == 0:
+                                    print("WARNING:  BF16 autocast requested but not supported on this device. Falling back to FP16.")
+                            else:
+                                print("WARNING:  BF16 autocast requested but not supported on this device. Falling back to FP16.")
+            else:
+                # default to float16
+                self.autocast_dtype = torch.float16
+        self.grad_scaler = None
+        if self.use_amp:
+            scaler_enabled = self.autocast_dtype == torch.float16
+            # Use torch.amp.GradScaler instead of deprecated torch.cuda.amp.GradScaler
+            self.grad_scaler = torch.amp.GradScaler('cuda', enabled=scaler_enabled)
         
         # setup noise scheduler
         noise_scheduler = None
@@ -125,7 +259,13 @@ class DiffusionPolicyUNet(PolicyAlgo):
         # setup EMA
         ema = None
         if self.algo_config.ema.enabled:
-            ema = EMAModel(model=nets, power=self.algo_config.ema.power)
+            ema_kwargs = {"power": self.algo_config.ema.power}
+            ema_parameters = list(nets.parameters())
+            try:
+                ema = EMAModel(parameters=ema_parameters, **ema_kwargs)
+            except TypeError:
+                # Backwards compatibility with older diffusers releases that expected ``model=...``
+                ema = EMAModel(model=nets, **ema_kwargs)
                 
         # set attrs
         self.nets = nets
@@ -134,6 +274,80 @@ class DiffusionPolicyUNet(PolicyAlgo):
         self.action_check_done = False
         self.obs_queue = None
         self.action_queue = None
+
+    def _decode_language_entry(self, entry):
+        if entry is None:
+            return ""
+        if isinstance(entry, str):
+            return entry
+        if isinstance(entry, (bytes, bytearray)):
+            try:
+                return entry.decode("utf-8")
+            except Exception:
+                return entry.decode("latin1", errors="ignore")
+        if isinstance(entry, torch.Tensor):
+            entry = entry.detach().cpu().tolist()
+        elif hasattr(entry, "tolist") and not isinstance(entry, (list, tuple, dict)):
+            entry = entry.tolist()
+        if isinstance(entry, (list, tuple)):
+            parts = [self._decode_language_entry(e) for e in entry]
+            return " ".join([p for p in parts if p])
+        return str(entry)
+
+    def _clean_prompt(self, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = text.replace("\n", " ")
+        cleaned = re.sub(r"!+", " ", cleaned)
+        cleaned = " ".join(cleaned.split())
+        if not cleaned:
+            return ""
+        tokens = cleaned.split()
+        clip_word_limit = 70
+        if len(tokens) > clip_word_limit:
+            tokens = tokens[:clip_word_limit]
+        cleaned = " ".join(tokens)
+        if len(cleaned) > 300:
+            cleaned = cleaned[:300]
+        return cleaned
+
+    def _decode_language_prompts(self, raw_entries):
+        if raw_entries is None:
+            return None
+        prompts = []
+        for entry in raw_entries:
+            decoded = self._decode_language_entry(entry)
+            decoded = self._clean_prompt(decoded)
+            if decoded:
+                prompts.append(decoded)
+        return prompts if len(prompts) > 0 else None
+
+    def _resolve_lang_prompts(self, lang_prompts, obs_source=None):
+        if lang_prompts is not None:
+            return list(lang_prompts)
+        if isinstance(obs_source, dict):
+            if "lang_prompts" in obs_source:
+                value = obs_source["lang_prompts"]
+                if isinstance(value, (list, tuple)):
+                    return list(value)
+            if "raw_language" in obs_source:
+                decoded = self._decode_language_prompts(obs_source["raw_language"])
+                if decoded:
+                    return decoded
+        return None
+
+    def _encode_obs_sequence(self, obs_encoder, obs_sequence, lang_prompts=None):
+        To = self.algo_config.horizon.observation_horizon
+        lang_cond = list(lang_prompts) if lang_prompts is not None else None
+        features = []
+        for t in range(To):
+            obs_t = TensorUtils.index_at_time(obs_sequence, t)
+            if lang_cond is not None:
+                feats_t = obs_encoder(obs=obs_t, lang_cond=lang_cond)
+            else:
+                feats_t = obs_encoder(obs=obs_t)
+            features.append(feats_t)
+        return torch.stack(features, dim=1)
     
     def process_batch_for_training(self, batch):
         """
@@ -154,19 +368,53 @@ class DiffusionPolicyUNet(PolicyAlgo):
 
         input_batch = dict()
 
-        ## Semi-hacky fix which does the filtering for raw language which is just a list of lists of strings
-        input_batch["obs"] = {k: batch["obs"][k][:, :To, :] for k in batch["obs"] if "raw" not in k }
-        if "lang_fixed/language_raw" in batch["obs"].keys():
-            str_ls = list(batch['obs']['lang_fixed/language_raw'][0])
-            input_batch["obs"]["lang_fixed/language_raw"] = [str_ls] * To
+        input_batch["obs"] = {}
+        for k, v in batch["obs"].items():
+            if "raw" in k:
+                continue
+            input_batch["obs"][k] = v[:, :To, ...]
+
+        lang_prompts = self._decode_language_prompts(batch["obs"].get("raw_language"))
+        if not lang_prompts:
+            lang_prompts = None
+
+        lang_keep_mask = None
+        lang_dropout_prob = float(getattr(self.algo_config, "language_dropout_prob", 0.0) or 0.0)
+        if lang_prompts is not None and lang_dropout_prob > 0:
+            drop_mask = torch.rand(len(lang_prompts)) < lang_dropout_prob
+            if drop_mask.all():
+                lang_prompts = None
+            else:
+                lang_prompts = [
+                    "" if drop else prompt
+                    for prompt, drop in zip(lang_prompts, drop_mask.tolist())
+                ]
+                lang_keep_mask = ~drop_mask
 
         with torch.no_grad():
-            if "raw_language" in batch["obs"].keys():
-                raw_lang_strings = [byte_string.decode('utf-8') for byte_string in batch["obs"]['raw_language']]
-                encoded_input = tokenizer(raw_lang_strings, padding=True, truncation=True, return_tensors='pt').to('cuda')
+            if lang_prompts is not None:
+                nets = self._get_nets()
+                device = next(nets["policy"].parameters()).device
+
+                lang_model = get_lang_model(device)
+
+                tokenizer = get_tokenizer()
+                encoded_input = tokenizer(
+                    lang_prompts,
+                    padding=True,
+                    truncation=True,
+                    max_length=tokenizer.model_max_length,
+                    return_tensors='pt'
+                ).to(device)
                 outputs = lang_model(**encoded_input)
-                encoded_lang = outputs.last_hidden_state.sum(1).squeeze().unsqueeze(1).repeat(1, To, 1)
-                input_batch["obs"]["lang_fixed/language_distilbert"] = encoded_lang.type(torch.float32)
+                encoded_lang = outputs.last_hidden_state.sum(1).unsqueeze(1).repeat(1, To, 1)
+                if lang_keep_mask is not None:
+                    keep = lang_keep_mask.to(device=device, dtype=encoded_lang.dtype).view(-1, 1, 1)
+                    encoded_lang = encoded_lang * keep
+                input_batch["obs"]["lang_fixed/language_distilbert"] = encoded_lang.float()
+
+        if lang_prompts is not None:
+            input_batch["lang_prompts"] = lang_prompts
 
         input_batch["actions"] = batch["actions"][:, :Tp, :]
         
@@ -218,6 +466,8 @@ class DiffusionPolicyUNet(PolicyAlgo):
         B = batch['actions'].shape[0]
 
         
+        lang_prompts = batch.get("lang_prompts", None)
+
         with TorchUtils.maybe_no_grad(no_grad=validate):
             info = super(DiffusionPolicyUNet, self).train_on_batch(batch, epoch, validate=validate)
             actions = batch['actions']
@@ -233,60 +483,205 @@ class DiffusionPolicyUNet(PolicyAlgo):
                 # first two dimensions should be [B, T] for inputs
                 assert inputs['obs'][k].ndim - 2 == len(self.obs_shapes[k])
             
-            obs_features = TensorUtils.time_distributed({"obs":inputs["obs"]}, self.nets['policy']['obs_encoder'], inputs_as_kwargs=True)
-            assert obs_features.ndim == 3  # [B, T, D]
-            obs_cond = obs_features.flatten(start_dim=1)
+            nets = self._get_nets()  # Unwrap DDP if necessary
+            resolved_prompts = self._resolve_lang_prompts(lang_prompts, batch)
+            alignment_weight_base = float(getattr(self.algo_config, 'cleandift_alignment_weight', 0.0) or 0.0)
+            alignment_weight = 0.0
+            if alignment_weight_base > 0.0:
+                if getattr(self, "_alignment_start_epoch", None) is None:
+                    self._alignment_start_epoch = int(epoch)
+                alignment_epoch = int(epoch) - int(self._alignment_start_epoch)
 
-            num_noise_samples = self.algo_config.noise_samples
+                # Alignment schedule: by default uses a warmdown fraction of total epochs (backwards compatible),
+                # but can be switched to a fixed warmdown step budget to avoid longer runs drifting more.
+                total_epochs = int(getattr(self.global_config.train, 'num_epochs', 1000) or 1000)
+                warmdown_steps_cfg = getattr(self.algo_config, 'cleandift_alignment_warmdown_steps', None)
+                warmdown_frac = float(getattr(self.algo_config, 'cleandift_alignment_warmdown_frac', 0.5) or 0.0)
+                min_decay_factor = float(getattr(self.algo_config, 'cleandift_alignment_min_decay_factor', 0.001) or 0.0)
+                decay_power = float(getattr(self.algo_config, 'cleandift_alignment_decay_power', 2.0) or 2.0)
 
-            # sample noise to add to actions
-            noise = torch.randn([num_noise_samples] + list(actions.shape), device=self.device)
-            
-            # sample a diffusion iteration for each data point
-            timesteps = torch.randint(
-                0, self.noise_scheduler.config.num_train_timesteps, 
-                (B,), device=self.device
-            ).long()
-            
-            # add noise to the clean actions according to the noise magnitude at each diffusion iteration
-            # (this is the forward diffusion process)
-            noisy_actions = torch.cat([self.noise_scheduler.add_noise(
-                            actions, noise[i], timesteps)
-                            for i in range(len(noise))], dim=0)
+                if warmdown_steps_cfg is not None:
+                    warmdown_steps = max(1, int(warmdown_steps_cfg))
+                else:
+                    warmdown_steps = max(1, int(total_epochs * warmdown_frac)) if warmdown_frac > 0.0 else 1
 
-            obs_cond = obs_cond.repeat(num_noise_samples, 1)
-            timesteps = timesteps.repeat(num_noise_samples)
+                min_decay_factor = max(0.0, min(1.0, min_decay_factor))
+                decay_power = max(1.0, decay_power)
+
+                if alignment_epoch < warmdown_steps:
+                    normalized_epoch = float(alignment_epoch) / float(warmdown_steps)
+                    decay_factor = min_decay_factor + (1.0 - min_decay_factor) * ((1.0 - normalized_epoch) ** decay_power)
+                else:
+                    decay_factor = min_decay_factor
+                alignment_weight = alignment_weight_base * decay_factor
+
+            # adjust alignment sampling frequency based on current weight (drop when sufficiently small)
+            if alignment_weight_base > 0.0:
+                drop_threshold = alignment_weight_base * self.alignment_freq_drop_ratio
+                if alignment_weight <= drop_threshold:
+                    self.current_alignment_freq = self.alignment_freq_low
+                else:
+                    self.current_alignment_freq = self.alignment_freq_high
+            else:
+                self.current_alignment_freq = 0.0
+
+            effective_freq = self.current_alignment_freq if alignment_weight > 0.0 else 0.0
+            sample_fraction = max(0.0, min(1.0, float(effective_freq))) if effective_freq > 0.0 else 0.0
+            alignment_freq = sample_fraction
+            compute_alignment = (
+                alignment_weight > 0.0
+                and not validate
+                and sample_fraction > 0.0
+            )
+
+            autocast_enabled = (
+                self.use_amp
+                and (self.autocast_dtype is not None)
+                and not validate
+                and torch.cuda.is_available()
+            )
+
+            autocast_kwargs = {'enabled': autocast_enabled}
+            if autocast_enabled and self.autocast_dtype is not None:
+                autocast_kwargs['dtype'] = self.autocast_dtype
+            with torch.amp.autocast(device_type='cuda', **autocast_kwargs):
+                obs_features = self._encode_obs_sequence(
+                    nets['policy']['obs_encoder'],
+                    inputs["obs"],
+                    lang_prompts=resolved_prompts,
+                )
+                assert obs_features.ndim == 3  # [B, T, D]
+                obs_cond = obs_features.flatten(start_dim=1)
+
+                num_noise_samples = self.algo_config.noise_samples
+
+                noise = torch.randn([num_noise_samples] + list(actions.shape), device=self.device)
+                timesteps = torch.randint(
+                    0, self.noise_scheduler.config.num_train_timesteps,
+                    (B,), device=self.device
+                ).long()
+
+                noisy_actions = torch.cat([
+                    self.noise_scheduler.add_noise(actions, noise[i], timesteps)
+                    for i in range(len(noise))
+                ], dim=0)
+
+                obs_cond = obs_cond.repeat(num_noise_samples, 1)
+                timesteps = timesteps.repeat(num_noise_samples)
+
+                noise_pred = nets['policy']['noise_pred_net'](
+                    noisy_actions, timesteps, global_cond=obs_cond)
+
+                noise = noise.view(noise.size(0) * noise.size(1), *noise.size()[2:])
+                policy_loss = F.mse_loss(noise_pred, noise)
+
+                alignment_loss = torch.tensor(0.0, device=self.device)
+
+                sample_indices = None
+                if compute_alignment:
+                    if sample_fraction < 1.0:
+                        sample_count = max(1, int(math.ceil(sample_fraction * B)))
+                        sample_indices = torch.randperm(B, device=self.device)[:sample_count]
+                    else:
+                        sample_count = B
+                        sample_indices = None
+
+                if compute_alignment:
+                    obs_encoder = nets['policy']['obs_encoder']
+                    if hasattr(obs_encoder, 'module'):
+                        obs_encoder = obs_encoder.module
+
+                    if hasattr(obs_encoder, 'nets'):
+                        for group_name, group_encoder in obs_encoder.nets.items():
+                            if hasattr(group_encoder, 'obs_nets'):
+                                for modality_name, modality_encoder in group_encoder.obs_nets.items():
+                                    if 'image' in modality_name and hasattr(modality_encoder, 'backbone'):
+                                        backbone = modality_encoder.backbone
+
+                                        if hasattr(backbone, 'encoder') and hasattr(backbone.encoder, 'compute_alignment_loss'):
+                                            total_alignment = 0.0
+                                            num_views = 0
+
+                                            for obs_key in inputs['obs']:
+                                                if 'image' in obs_key:
+                                                    obs_images = inputs['obs'][obs_key]
+                                                    obs_current = obs_images[:, -1]
+
+                                                    if sample_indices is not None:
+                                                        obs_current = obs_current.index_select(0, sample_indices)
+
+                                                    if resolved_prompts is not None:
+                                                        if sample_indices is not None:
+                                                            idx_list = sample_indices.tolist()
+                                                            captions = [resolved_prompts[i] for i in idx_list]
+                                                        else:
+                                                            captions = resolved_prompts
+                                                    else:
+                                                        captions = [""] * obs_current.shape[0]
+
+                                                    view_alignment = backbone.encoder.compute_alignment_loss(
+                                                        obs_current,
+                                                        caption=captions
+                                                    )
+                                                    total_alignment += view_alignment
+                                                    num_views += 1
+
+                                            if num_views > 0:
+                                                alignment_loss = total_alignment / num_views
+
+                                            break
+                                else:
+                                    continue
+                                break
+
+            total_loss = policy_loss + alignment_weight * alignment_loss
             
-            # predict the noise residual
-            noise_pred = self.nets['policy']['noise_pred_net'](
-                noisy_actions, timesteps, global_cond=obs_cond)
-            
-            # L2 loss
-            noise = noise.view(noise.size(0) * noise.size(1), *noise.size()[2:])
-            loss = F.mse_loss(noise_pred, noise)
-            
-            # logging
             losses = {
-                'l2_loss': loss
+                'l2_loss': policy_loss,
+                'alignment_loss': alignment_loss,
+                'total_loss': total_loss
             }
             info["losses"] = TensorUtils.detach(losses)
+            info["alignment_weight"] = alignment_weight
+            info["alignment_freq"] = float(self.current_alignment_freq if hasattr(self, "current_alignment_freq") else getattr(self.algo_config, 'cleandift_alignment_freq', 1.0))
 
             if not validate:
-                # gradient step
-                policy_grad_norms = TorchUtils.backprop_for_loss(
-                    net=self.nets,
-                    optim=self.optimizers["policy"],
-                    loss=loss,
-                )
-                
-                # update Exponential Moving Average of the model weights
+                optimizer = self.optimizers["policy"]
+                optimizer.zero_grad(set_to_none=True)
+
+                policy_grad_norms = 0.0
+                grad_norm_clip = getattr(self.global_config.train, 'max_grad_norm', None)
+
+                if self.use_amp and self.grad_scaler is not None and self.grad_scaler.is_enabled():
+                    scaled_loss = self.grad_scaler.scale(total_loss)
+                    scaled_loss.backward()
+                    self.grad_scaler.unscale_(optimizer)
+                    if grad_norm_clip is not None:
+                        torch.nn.utils.clip_grad_norm_(
+                            nets['policy'].parameters(),
+                            grad_norm_clip
+                        )
+                    for p in nets['policy'].parameters():
+                        if p.grad is not None:
+                            policy_grad_norms += p.grad.data.norm(2).pow(2).item()
+                    self.grad_scaler.step(optimizer)
+                    self.grad_scaler.update()
+                else:
+                    total_loss.backward()
+                    if grad_norm_clip is not None:
+                        torch.nn.utils.clip_grad_norm_(
+                            nets['policy'].parameters(),
+                            grad_norm_clip
+                        )
+                    for p in nets['policy'].parameters():
+                        if p.grad is not None:
+                            policy_grad_norms += p.grad.data.norm(2).pow(2).item()
+                    optimizer.step()
+
                 if self.ema is not None:
                     self.ema.step(self.nets)
-                
-                step_info = {
-                    'policy_grad_norms': policy_grad_norms
-                }
-                info.update(step_info)
+
+                info['policy_grad_norms'] = policy_grad_norms
 
         return info
     
@@ -302,9 +697,29 @@ class DiffusionPolicyUNet(PolicyAlgo):
             loss_log (dict): name -> summary statistic
         """
         log = super(DiffusionPolicyUNet, self).log_info(info)
+        
         log["Loss"] = info["losses"]["l2_loss"].item()
+        
+        log["Total_Loss"] = info["losses"]["total_loss"].item()
+        
+        if "alignment_loss" in info["losses"]:
+            align_loss_val = info["losses"]["alignment_loss"]
+            if isinstance(align_loss_val, torch.Tensor):
+                align_loss_val = align_loss_val.item()
+            log["Alignment_Loss"] = align_loss_val
+            
+            if log["Total_Loss"] > 0:
+                log["Alignment_Loss_Ratio"] = abs(align_loss_val) / log["Total_Loss"]
+            
+            if "alignment_weight" in info:
+                log["Alignment_Weight"] = info["alignment_weight"]
+        
         if "policy_grad_norms" in info:
             log["Policy_Grad_Norms"] = info["policy_grad_norms"]
+
+        if "alignment_freq" in info:
+            log["Alignment_Freq"] = info["alignment_freq"]
+        
         return log
     
     def reset(self):
@@ -335,6 +750,8 @@ class DiffusionPolicyUNet(PolicyAlgo):
         To = self.algo_config.horizon.observation_horizon
         Ta = self.algo_config.horizon.action_horizon
 
+        lang_prompts = None
+
         if eval_mode:
             from droid.misc.parameters import hand_camera_id, varied_camera_1_id, varied_camera_2_id
             root_path = os.path.join(os. getcwd(), "eval_params")
@@ -361,12 +778,20 @@ class DiffusionPolicyUNet(PolicyAlgo):
                 with open(os.path.join(root_path, "lang_command.txt"), 'r') as file:
                     raw_lang = file.read()
 
-                encoded_input = tokenizer(raw_lang, return_tensors='pt').to('cuda')
+                nets = self._get_nets()  # Unwrap DDP if necessary
+                device = next(nets["policy"].parameters()).device
+                lang_model = get_lang_model(device)
+                
+                tokenizer = get_tokenizer()
+                encoded_input = tokenizer(raw_lang, return_tensors='pt').to(device)
                 outputs = lang_model(**encoded_input)
                 encoded_lang = outputs.last_hidden_state.sum(1).squeeze().unsqueeze(0).repeat(To, 1).unsqueeze(0)
                 obs_dict["lang_fixed/language_distilbert"] = encoded_lang.type(torch.float32)
+                lang_prompts = [raw_lang]
 
         ###############################
+
+        lang_prompts = self._resolve_lang_prompts(lang_prompts, obs_dict)
 
         # TODO: obs_queue already handled by frame_stack
         # make sure we have at least To observations in obs_queue
@@ -384,7 +809,7 @@ class DiffusionPolicyUNet(PolicyAlgo):
             
             # run inference
             # [1,T,Da]
-            action_sequence = self._get_action_trajectory(obs_dict=obs_dict)
+            action_sequence = self._get_action_trajectory(obs_dict=obs_dict, lang_prompts=lang_prompts)
             
             # put actions into the queue
             self.action_queue.extend(action_sequence[0])
@@ -397,7 +822,7 @@ class DiffusionPolicyUNet(PolicyAlgo):
         action = action.unsqueeze(0)
         return action
         
-    def _get_action_trajectory(self, obs_dict):
+    def _get_action_trajectory(self, obs_dict, lang_prompts=None):
         assert not self.nets.training
         To = self.algo_config.horizon.observation_horizon
         Ta = self.algo_config.horizon.action_horizon
@@ -411,9 +836,13 @@ class DiffusionPolicyUNet(PolicyAlgo):
             raise ValueError
         
         # select network
-        nets = self.nets
+        nets = self._get_nets()
         if self.ema is not None:
-            nets = self.ema.averaged_model
+            # For new diffusers API: use copy_to to temporarily apply EMA weights
+            # Store current parameters
+            self.ema.store(self.nets.parameters())
+            # Copy EMA parameters to nets
+            self.ema.copy_to(self.nets.parameters())
         
         # encode obs
         inputs = {
@@ -425,7 +854,15 @@ class DiffusionPolicyUNet(PolicyAlgo):
                 continue
             # first two dimensions should be [B, T] for inputs
             assert inputs['obs'][k].ndim - 2 == len(self.obs_shapes[k])
-        obs_features = TensorUtils.time_distributed({"obs":inputs["obs"]}, nets['policy']['obs_encoder'].module, inputs_as_kwargs=True)
+        resolved_prompts = self._resolve_lang_prompts(lang_prompts, obs_dict)
+        obs_encoder_eval = nets['policy']['obs_encoder']
+        if hasattr(obs_encoder_eval, 'module'):
+            obs_encoder_eval = obs_encoder_eval.module
+        obs_features = self._encode_obs_sequence(
+            obs_encoder_eval,
+            inputs["obs"],
+            lang_prompts=resolved_prompts,
+        )
         assert obs_features.ndim == 3  # [B, T, D]
         B = obs_features.shape[0]
 
@@ -443,7 +880,10 @@ class DiffusionPolicyUNet(PolicyAlgo):
 
         for k in self.noise_scheduler.timesteps:
             # predict noise
-            noise_pred = nets['policy']['noise_pred_net'].module(
+            noise_pred_module = nets['policy']['noise_pred_net']
+            if hasattr(noise_pred_module, "module"):
+                noise_pred_module = noise_pred_module.module
+            noise_pred = noise_pred_module(
                 sample=naction, 
                 timestep=k,
                 global_cond=obs_cond
@@ -460,6 +900,11 @@ class DiffusionPolicyUNet(PolicyAlgo):
         start = To - 1
         end = start + Ta
         action = naction[:,start:end]
+        
+        # Restore original parameters if EMA was used
+        if self.ema is not None:
+            self.ema.restore(self.nets.parameters())
+        
         return action
 
     def serialize(self):
@@ -468,7 +913,8 @@ class DiffusionPolicyUNet(PolicyAlgo):
         """
         return {
             "nets": self.nets.state_dict(),
-            "ema": self.ema.averaged_model.state_dict() if self.ema is not None else None,
+            "ema": self.ema.state_dict() if self.ema is not None else None,
+            "alignment_start_epoch": getattr(self, "_alignment_start_epoch", None),
         }
 
     def deserialize(self, model_dict):
@@ -479,9 +925,43 @@ class DiffusionPolicyUNet(PolicyAlgo):
             model_dict (dict): a dictionary saved by self.serialize() that contains
                 the same keys as @self.network_classes
         """
-        self.nets.load_state_dict(model_dict["nets"])
+        # Handle DDP wrapper mismatch: checkpoint may have 'module.' prefix but current model may not
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        
+        nets_state = model_dict["nets"]
+        current_is_ddp = isinstance(self.nets, DDP)
+        
+        # Check if saved state has 'module.' prefix
+        saved_has_prefix = any(k.startswith('module.') for k in nets_state.keys())
+        
+        # If there's a mismatch, we need to adjust the keys
+        if saved_has_prefix and not current_is_ddp:
+            # Saved with DDP, loading to non-DDP: remove 'module.' prefix
+            new_state = {}
+            for k, v in nets_state.items():
+                new_key = k[7:] if k.startswith('module.') else k  # remove 'module.'
+                new_state[new_key] = v
+            nets_state = new_state
+        elif not saved_has_prefix and current_is_ddp:
+            # Saved without DDP, loading to DDP: add 'module.' prefix
+            new_state = {}
+            for k, v in nets_state.items():
+                new_key = f'module.{k}' if not k.startswith('module.') else k
+                new_state[new_key] = v
+            nets_state = new_state
+        
+        self.nets.load_state_dict(nets_state)
         if model_dict.get("ema", None) is not None:
-            self.ema.averaged_model.load_state_dict(model_dict["ema"])
+            self.ema.load_state_dict(model_dict["ema"])
+            # CRITICAL: Move EMA shadow parameters to the same device as model parameters
+            # This is necessary when loading from CPU checkpoint to GPU model in DDP
+            if hasattr(self.ema, 'shadow_params') and len(self.ema.shadow_params) > 0:
+                # Get device from model parameters
+                model_device = next(self.nets.parameters()).device
+                # Move all EMA shadow params to model device
+                self.ema.shadow_params = [p.to(model_device) for p in self.ema.shadow_params]
+
+        self._alignment_start_epoch = model_dict.get("alignment_start_epoch", None)
 
     
             
@@ -726,10 +1206,6 @@ class ConditionalUnet1D(nn.Module):
         self.up_modules = up_modules
         self.down_modules = down_modules
         self.final_conv = final_conv
-
-        print("number of parameters: {:e}".format(
-            sum(p.numel() for p in self.parameters()))
-        )
 
     def forward(self, 
             sample: torch.Tensor, 

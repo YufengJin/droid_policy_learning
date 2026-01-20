@@ -14,3 +14,8 @@ torchvision
 diffusers==0.11.1
 opencv-python
 transformers==4.34.0
+omegaconf
+safetensors
+huggingface_hub
+einops
+jaxtyping

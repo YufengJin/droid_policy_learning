@@ -11,6 +11,13 @@ import random
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional, Tuple
+
+try:
+    from omegaconf import ListConfig
+except ImportError:
+    ListConfig = None
 
 import robomimic.models.base_nets as BaseNets
 import robomimic.utils.tensor_utils as TensorUtils
@@ -19,11 +26,24 @@ from robomimic.utils.python_utils import extract_class_init_kwargs_from_dict
 
 # NOTE: this is required for the backbone classes to be found by the `eval` call in the core networks
 from robomimic.models.base_nets import *
+
+# Import CleanDIFT backbone if available
+try:
+    from robomimic.models.cleandift_backbone import CleanDIFTConv
+except ImportError:
+    print("Warning: CleanDIFT backbone not available")
+    pass
+
 from robomimic.utils.vis_utils import visualize_image_randomizer
 from robomimic.macros import VISUALIZE_RANDOMIZER
 
 import torchvision.transforms.functional as TVF
 from torchvision.transforms import Lambda, Compose
+
+try:
+    from agents.encoders.cleandift_img_encoder import CleanDIFTImgEncoder
+except ImportError:
+    CleanDIFTImgEncoder = None
 
 """
 ================================================
@@ -137,6 +157,9 @@ class VisualCore(EncoderCore, BaseNets.ConvBase):
             net_list.append(linear)
 
         self.nets = nn.Sequential(*net_list)
+        
+        # Expose use_text_condition attribute if backbone has it
+        self.use_text_condition = getattr(self.backbone, 'use_text_condition', False)
 
     def output_shape(self, input_shape):
         """
@@ -163,13 +186,40 @@ class VisualCore(EncoderCore, BaseNets.ConvBase):
         else:
             return feat_shape
 
-    def forward(self, inputs):
+    def forward(self, inputs, lang_cond=None):
         """
         Forward pass through visual core.
+        
+        Args:
+            inputs: visual input tensor
+            lang_cond: optional language conditioning (for text-conditioned backbones like CleanDIFT)
         """
         ndim = len(self.input_shape)
         assert tuple(inputs.shape)[-ndim:] == tuple(self.input_shape)
-        return super(VisualCore, self).forward(inputs)
+        
+        # Check if backbone supports language conditioning
+        if lang_cond is not None and hasattr(self.backbone, 'use_text_condition') and self.backbone.use_text_condition:
+            # Manual forward pass with language conditioning
+            x = self.backbone(inputs, lang_cond=lang_cond)
+            
+            # Apply remaining layers manually
+            if self.pool is not None:
+                x = self.pool(x)
+            
+            if self.flatten:
+                x = torch.flatten(x, start_dim=1)
+            
+            if self.feature_dimension is not None:
+                # Find the linear layer in self.nets
+                for layer in self.nets:
+                    if isinstance(layer, torch.nn.Linear):
+                        x = layer(x)
+                        break
+            
+            return x
+        else:
+            # Original behavior: use sequential forward
+            return self.nets(inputs)
 
     def __repr__(self):
         """Pretty print network."""
@@ -183,6 +233,107 @@ class VisualCore(EncoderCore, BaseNets.ConvBase):
         msg = header + '(' + msg + '\n)'
         return msg
 
+
+class CleanDIFTRGBCore(EncoderCore):
+    """Observation encoder core that delegates RGB encoding to CleanDIFT."""
+
+    def __init__(
+        self,
+        input_shape: Tuple[int, int, int],
+        sd_version: str = "sd21",
+        feature_key: str = "us6",
+        map_out_dim: Optional[int] = 512,
+        freeze_backbone: bool = True,
+        device: str = "cuda",
+        resize_shape: Optional[Tuple[int, int]] = (128, 128),
+        normalize_mode: str = "zero_one",
+        use_text_condition: bool = False,
+    ):
+        super(CleanDIFTRGBCore, self).__init__(input_shape=input_shape)
+
+        if CleanDIFTImgEncoder is None:
+            raise ImportError(
+                "CleanDIFTImgEncoder is unavailable. Ensure agents.encoders.cleandift_img_encoder "
+                "is importable before using CleanDIFTRGBCore."
+            )
+
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"CleanDIFTRGBCore expects 3D input shape (C,H,W), got {input_shape}"
+            )
+
+        if resize_shape is not None:
+            if len(resize_shape) != 2:
+                raise ValueError(f"resize_shape must be (H, W), got {resize_shape}")
+            self.resize_shape = tuple(int(v) for v in resize_shape)
+        else:
+            self.resize_shape = tuple(int(v) for v in input_shape[1:])
+
+        self.normalize_mode = normalize_mode
+        self.use_text_condition = use_text_condition
+
+        if ListConfig is not None and isinstance(feature_key, ListConfig):
+            feature_key = list(feature_key)
+        elif isinstance(feature_key, tuple):
+            feature_key = list(feature_key)
+        self.feature_key = feature_key
+
+        if self.normalize_mode not in {None, "zero_one"}:
+            raise ValueError(
+                f"Unsupported normalize_mode '{self.normalize_mode}'. Use None or 'zero_one'."
+            )
+
+        if self.normalize_mode == "zero_one":
+            mean = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1)
+            std = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1)
+            self.register_buffer("_norm_mean", mean)
+            self.register_buffer("_norm_std", std)
+        else:
+            self._norm_mean = None
+            self._norm_std = None
+
+        self.encoder = CleanDIFTImgEncoder(
+            sd_version=sd_version,
+            feature_key=feature_key,
+            freeze_backbone=freeze_backbone,
+            device=device,
+            use_text_condition=use_text_condition,
+            map_out_dim=map_out_dim,
+        )
+
+        if map_out_dim is not None:
+            self._feature_dim = int(map_out_dim)
+        else:
+            if isinstance(feature_key, (list, tuple)):
+                missing = [k for k in feature_key if k not in self.encoder.feature_dims]
+                if missing:
+                    raise KeyError(
+                        f"CleanDIFT feature dims missing keys {missing}. "
+                        f"Available keys: {list(self.encoder.feature_dims.keys())}"
+                    )
+                self._feature_dim = int(sum(self.encoder.feature_dims[k] for k in feature_key))
+            else:
+                if feature_key not in self.encoder.feature_dims:
+                    raise KeyError(
+                        f"CleanDIFT feature dims missing key '{feature_key}'. Available keys: "
+                        f"{list(self.encoder.feature_dims.keys())}"
+                    )
+                self._feature_dim = int(self.encoder.feature_dims[feature_key])
+
+    def output_shape(self, input_shape):
+        return [self._feature_dim]
+
+    def forward(self, inputs):
+        assert tuple(inputs.shape)[-3:] == tuple(self.input_shape)
+        x = inputs
+        target_h, target_w = self.resize_shape
+        if (inputs.shape[-2], inputs.shape[-1]) != (target_h, target_w):
+            x = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=False)
+        x = x.float()
+        if self.normalize_mode == "zero_one" and self._norm_mean is not None:
+            x = (x - self._norm_mean) / self._norm_std
+        features = self.encoder(x, lang_cond=None)
+        return features
 
 """
 ================================================

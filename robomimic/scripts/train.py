@@ -44,7 +44,13 @@ from robomimic.utils.dataset import action_stats_to_normalization_stats
 from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
-from robomimic.utils.rlds_utils import droid_dataset_transform, robomimic_transform, DROID_TO_RLDS_OBS_KEY_MAP, DROID_TO_RLDS_LOW_DIM_OBS_KEY_MAP, TorchRLDSDataset
+from robomimic.utils.rlds_utils import (
+    droid_dataset_transform,
+    robomimic_transform,
+    DROID_TO_RLDS_OBS_KEY_MAP,
+    DROID_TO_RLDS_LOW_DIM_OBS_KEY_MAP,
+    TorchRLDSDataset,
+)
 
 from octo.data.dataset import make_dataset_from_rlds, make_interleaved_dataset
 from octo.data.utils.data_utils import combine_dataset_statistics
@@ -67,6 +73,9 @@ def train(config, device):
     print(config)
     print("")
     log_dir, ckpt_dir, video_dir, vis_dir = TrainUtils.get_exp_dir(config)
+    if getattr(config.train, "checkpoint_dir", None):
+        ckpt_dir = os.path.expanduser(config.train.checkpoint_dir)
+        os.makedirs(ckpt_dir, exist_ok=True)
 
     if config.experiment.logging.terminal_output_to_txt:
         # log stdout and stderr to a text file
@@ -78,6 +87,11 @@ def train(config, device):
     ObsUtils.initialize_obs_utils_with_config(config)
 
     ds_format = config.train.data_format
+    use_neg_one_one_norm = False
+    if hasattr(config.observation.encoder, "rgb") and hasattr(config.observation.encoder.rgb, "core_kwargs"):
+        backbone_class = config.observation.encoder.rgb.core_kwargs.get("backbone_class", "")
+        if "CleanDIFT" in backbone_class or "DIFT" in backbone_class:
+            use_neg_one_one_norm = True
 
     if ds_format == "droid_rlds":
         # # load basic metadata from training file
@@ -90,7 +104,20 @@ def train(config, device):
 
         obs_modalities = config.observation.modalities.obs.rgb
         # NOTE: Must be 2 cam for now, can clean this up later
-        assert(len(obs_modalities) == 2)
+        assert len(obs_modalities) == 2
+        for cam_key in obs_modalities:
+            if cam_key not in DROID_TO_RLDS_OBS_KEY_MAP:
+                available_keys = list(DROID_TO_RLDS_OBS_KEY_MAP.keys())
+                raise KeyError(
+                    "Camera key '{}' not found in DROID_TO_RLDS_OBS_KEY_MAP.\n"
+                    "Available keys: {}\n"
+                    "Your config has: {}\n"
+                    "Hint: Use --cameras to specify correct camera names, e.g.:\n"
+                    "  For DROID: --cameras hand_camera_left varied_camera_1_left\n"
+                    "  For real robot: --cameras wrist_left varied_camera_1_left".format(
+                        cam_key, available_keys, obs_modalities
+                    )
+                )
         ac_dim = sum([ac_comp[1] for ac_comp in config.train.action_shapes])
         action_config = config.train.action_config
         is_abs_action = [True] * ac_dim
@@ -153,7 +180,18 @@ def train(config, device):
         rlds_dataset_stats = dataset.dataset_statistics[0] if isinstance(dataset.dataset_statistics, list) else dataset.dataset_statistics
         action_stats = ActionUtils.get_action_stats_dict(rlds_dataset_stats["action"], config.train.action_keys, config.train.action_shapes)
         action_normalization_stats = action_stats_to_normalization_stats(action_stats, action_config)
-        dataset = dataset.map(robomimic_transform, num_parallel_calls=config.train.traj_transform_threads)
+        has_proprio = len(config.observation.modalities.obs.low_dim) > 0
+        view_dropout_prob = getattr(config.train, "view_dropout_prob", 0.0)
+        dataset = dataset.map(
+            lambda traj: robomimic_transform(
+                traj,
+                normalize_to_neg_one_one=use_neg_one_one_norm,
+                include_proprio=has_proprio,
+                view_dropout_prob=view_dropout_prob,
+                camera_keys=obs_modalities,
+            ),
+            num_parallel_calls=config.train.traj_transform_threads,
+        )
 
         pytorch_dataset = TorchRLDSDataset(dataset)
         train_loader = DataLoader(
@@ -234,6 +272,11 @@ def train(config, device):
     if config.experiment.env is not None:
         env_meta["env_name"] = config.experiment.env
         print("=" * 30 + "\n" + "Replacing Env to {}\n".format(env_meta["env_name"]) + "=" * 30)
+
+    if config.experiment.rollout.enabled and ("env_name" not in env_meta):
+        if not os.environ.get("ROBOMIMIC_QUIET"):
+            print("Rollouts disabled: env metadata not available for this data format.")
+        config.experiment.rollout.enabled = False
 
     # create environment
     envs = OrderedDict()

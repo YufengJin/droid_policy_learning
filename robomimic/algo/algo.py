@@ -298,6 +298,15 @@ class Algo(object):
         """
         self.nets.train()
 
+    def _get_nets(self):
+        """
+        Get the actual nets ModuleDict, unwrapping DDP if necessary.
+        """
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        if isinstance(self.nets, DDP):
+            return self.nets.module
+        return self.nets
+
     def serialize(self):
         """
         Get dictionary of current model parameters.
