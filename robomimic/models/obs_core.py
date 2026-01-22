@@ -8,6 +8,7 @@ import abc
 import numpy as np
 import textwrap
 import random
+import os
 
 import torch
 import torch.nn as nn
@@ -31,8 +32,7 @@ from robomimic.models.base_nets import *
 try:
     from robomimic.models.cleandift_backbone import CleanDIFTConv
 except ImportError:
-    print("Warning: CleanDIFT backbone not available")
-    pass
+    CleanDIFTConv = None
 
 from robomimic.utils.vis_utils import visualize_image_randomizer
 from robomimic.macros import VISUALIZE_RANDOMIZER
@@ -248,6 +248,7 @@ class CleanDIFTRGBCore(EncoderCore):
         resize_shape: Optional[Tuple[int, int]] = (128, 128),
         normalize_mode: str = "zero_one",
         use_text_condition: bool = False,
+        custom_checkpoint: Optional[str] = None,
     ):
         super(CleanDIFTRGBCore, self).__init__(input_shape=input_shape)
 
@@ -299,6 +300,7 @@ class CleanDIFTRGBCore(EncoderCore):
             device=device,
             use_text_condition=use_text_condition,
             map_out_dim=map_out_dim,
+            custom_checkpoint=custom_checkpoint,
         )
 
         if map_out_dim is not None:

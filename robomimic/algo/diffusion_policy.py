@@ -67,18 +67,25 @@ def get_lang_model(device):
     
     if _lang_model is not None and _lang_model_device == device:
         return _lang_model
-    
+
+    def _load_lang_model(local_only):
+        kwargs = {"local_files_only": True} if local_only else {}
+        try:
+            return AutoModel.from_pretrained(
+                "distilbert-base-uncased",
+                torch_dtype=torch.float16,
+                **kwargs,
+            )
+        except TypeError:
+            return AutoModel.from_pretrained(
+                "distilbert-base-uncased",
+                **kwargs,
+            )
+
     try:
-        _lang_model = AutoModel.from_pretrained(
-            "distilbert-base-uncased",
-            dtype=torch.float16,
-        )
+        _lang_model = _load_lang_model(local_only=False)
     except Exception:
-        _lang_model = AutoModel.from_pretrained(
-            "distilbert-base-uncased",
-            dtype=torch.float16,
-            local_files_only=True,
-        )
+        _lang_model = _load_lang_model(local_only=True)
     _lang_model.to(device)
     _lang_model_device = device
     
@@ -198,9 +205,9 @@ class DiffusionPolicyUNet(PolicyAlgo):
         nets = nets.float().to(self.device)
 
         # AMP configuration (defaults controlled via training config)
-        requested_amp = bool(getattr(self.global_config.train, "use_amp", False))
+        requested_amp = bool(self.global_config.train.get("use_amp", False))
         self.use_amp = requested_amp and torch.cuda.is_available()
-        amp_dtype_cfg = str(getattr(self.global_config.train, "amp_dtype", "bfloat16")).lower()
+        amp_dtype_cfg = str(self.global_config.train.get("amp_dtype", "bfloat16")).lower()
         self.autocast_dtype = None
         if self.use_amp:
             if amp_dtype_cfg == "float16":
@@ -837,12 +844,18 @@ class DiffusionPolicyUNet(PolicyAlgo):
         
         # select network
         nets = self._get_nets()
+        ema_restore_mode = None
         if self.ema is not None:
-            # For new diffusers API: use copy_to to temporarily apply EMA weights
-            # Store current parameters
-            self.ema.store(self.nets.parameters())
-            # Copy EMA parameters to nets
-            self.ema.copy_to(self.nets.parameters())
+            if hasattr(self.ema, "store") and hasattr(self.ema, "copy_to"):
+                # Newer diffusers EMA API: temporarily swap in EMA weights.
+                self.ema.store(self.nets.parameters())
+                self.ema.copy_to(self.nets.parameters())
+                ema_restore_mode = "params"
+                nets = self._get_nets()
+            elif hasattr(self.ema, "averaged_model"):
+                # Older diffusers EMA API: use the averaged model directly.
+                nets = self.ema.averaged_model
+                ema_restore_mode = "avg_model"
         
         # encode obs
         inputs = {
@@ -902,8 +915,9 @@ class DiffusionPolicyUNet(PolicyAlgo):
         action = naction[:,start:end]
         
         # Restore original parameters if EMA was used
-        if self.ema is not None:
-            self.ema.restore(self.nets.parameters())
+        if self.ema is not None and ema_restore_mode == "params":
+            if hasattr(self.ema, "restore"):
+                self.ema.restore(self.nets.parameters())
         
         return action
 
@@ -911,9 +925,25 @@ class DiffusionPolicyUNet(PolicyAlgo):
         """
         Get dictionary of current model parameters.
         """
+        def _ema_state(ema_obj):
+            if ema_obj is None:
+                return None
+            if hasattr(ema_obj, "state_dict"):
+                try:
+                    return {"_type": "state_dict", "data": ema_obj.state_dict()}
+                except Exception:
+                    pass
+            data = {}
+            if hasattr(ema_obj, "shadow_params"):
+                data["shadow_params"] = [p.detach().cpu() for p in ema_obj.shadow_params]
+            for attr in ("decay", "power", "inv_gamma", "min_decay", "optimization_step"):
+                if hasattr(ema_obj, attr):
+                    data[attr] = getattr(ema_obj, attr)
+            return {"_type": "raw", "data": data} if data else None
+
         return {
             "nets": self.nets.state_dict(),
-            "ema": self.ema.state_dict() if self.ema is not None else None,
+            "ema": _ema_state(self.ema),
             "alignment_start_epoch": getattr(self, "_alignment_start_epoch", None),
         }
 
@@ -951,14 +981,32 @@ class DiffusionPolicyUNet(PolicyAlgo):
             nets_state = new_state
         
         self.nets.load_state_dict(nets_state)
-        if model_dict.get("ema", None) is not None:
-            self.ema.load_state_dict(model_dict["ema"])
+        ema_state = model_dict.get("ema", None)
+        if ema_state is not None and self.ema is not None:
+            loaded = False
+            if isinstance(ema_state, dict) and ema_state.get("_type") == "state_dict":
+                if hasattr(self.ema, "load_state_dict"):
+                    self.ema.load_state_dict(ema_state["data"])
+                    loaded = True
+            else:
+                if hasattr(self.ema, "load_state_dict"):
+                    try:
+                        self.ema.load_state_dict(ema_state)
+                        loaded = True
+                    except Exception:
+                        loaded = False
+            if not loaded:
+                data = ema_state.get("data", ema_state) if isinstance(ema_state, dict) else None
+                if isinstance(data, dict):
+                    if "shadow_params" in data and hasattr(self.ema, "shadow_params"):
+                        model_device = next(self.nets.parameters()).device
+                        self.ema.shadow_params = [p.to(model_device) for p in data["shadow_params"]]
+                    for attr in ("decay", "power", "inv_gamma", "min_decay", "optimization_step"):
+                        if attr in data and hasattr(self.ema, attr):
+                            setattr(self.ema, attr, data[attr])
             # CRITICAL: Move EMA shadow parameters to the same device as model parameters
-            # This is necessary when loading from CPU checkpoint to GPU model in DDP
             if hasattr(self.ema, 'shadow_params') and len(self.ema.shadow_params) > 0:
-                # Get device from model parameters
                 model_device = next(self.nets.parameters()).device
-                # Move all EMA shadow params to model device
                 self.ema.shadow_params = [p.to(model_device) for p in self.ema.shadow_params]
 
         self._alignment_start_epoch = model_dict.get("alignment_start_epoch", None)

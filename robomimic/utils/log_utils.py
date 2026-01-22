@@ -53,6 +53,19 @@ class DataLogger(object):
         self._wandb_logger = None
         self._data = dict() # store all the scalar data logged so far
 
+        def _is_main_process():
+            rank_env = os.environ.get("RANK")
+            if rank_env is None:
+                return True
+            try:
+                return int(rank_env) == 0
+            except ValueError:
+                return True
+
+        def _status_log(message):
+            if _is_main_process():
+                print(message, flush=True)
+
         if log_tb:
             from tensorboardX import SummaryWriter
             self._tb_logger = SummaryWriter(os.path.join(log_dir, 'tb'))
@@ -60,6 +73,7 @@ class DataLogger(object):
         if log_wandb:
             import wandb
             import robomimic.macros as Macros
+            _status_log("W&B: initializing...")
             
             # set up wandb api key if specified in macros
             if Macros.WANDB_API_KEY is not None:
@@ -75,14 +89,22 @@ class DataLogger(object):
                 try:
                     # set up wandb
                     self._wandb_logger = wandb
-
+                    init_timeout = int(os.environ.get("WANDB_INIT_TIMEOUT", "120"))
+                    settings = wandb.Settings(init_timeout=init_timeout)
                     self._wandb_logger.init(
                         entity=Macros.WANDB_ENTITY,
                         project=config.experiment.logging.wandb_proj_name,
                         name=config.experiment.name,
                         dir=log_dir,
                         mode=("offline" if attempt == num_attempts - 1 else "online"),
+                        settings=settings,
                     )
+                    run = getattr(self._wandb_logger, "run", None)
+                    run_id = getattr(run, "id", None) if run is not None else None
+                    run_mode = getattr(run, "mode", None) if run is not None else None
+                    mode_label = run_mode or ("offline" if attempt == num_attempts - 1 else "online")
+                    suffix = f" id={run_id}" if run_id else ""
+                    _status_log(f"W&B: initialized ({mode_label}){suffix}")
 
                     # set up info for identifying experiment
                     wandb_config = {k: v for (k, v) in config.meta.items() if k not in ["hp_keys", "hp_values"]}
@@ -97,6 +119,8 @@ class DataLogger(object):
                     log_warning("wandb initialization error (attempt #{}): {}".format(attempt + 1, e))
                     self._wandb_logger = None
                     time.sleep(30)
+            if self._wandb_logger is None:
+                _status_log("W&B: init failed; no run started. Check network or set WANDB_MODE=offline.")
 
     def record(self, k, v, epoch, data_type='scalar', log_stats=False):
         """
@@ -180,6 +204,9 @@ class custom_tqdm(tqdm):
     """
     def __init__(self, *args, **kwargs):
         assert "file" not in kwargs
+        disable_env = os.environ.get("TQDM_DISABLE", "").strip().lower()
+        if disable_env in {"1", "true", "yes"}:
+            kwargs["disable"] = True
         super(custom_tqdm, self).__init__(*args, file=sys.stdout, **kwargs)
 
 
@@ -215,6 +242,8 @@ def log_warning(message, color="yellow", print_now=True):
     global WARNINGS_BUFFER
     buffer_message = colored("ROBOMIMIC WARNING(\n{}\n)".format(textwrap.indent(message, "    ")), color)
     WARNINGS_BUFFER.append(buffer_message)
+    if os.environ.get("ROBOMIMIC_QUIET", "0") == "1":
+        print_now = False
     if print_now:
         print(buffer_message)
 
@@ -225,6 +254,7 @@ def flush_warnings():
     clears the global registry.
     """
     global WARNINGS_BUFFER
-    for msg in WARNINGS_BUFFER:
-        print(msg)
+    if os.environ.get("ROBOMIMIC_QUIET", "0") != "1":
+        for msg in WARNINGS_BUFFER:
+            print(msg)
     WARNINGS_BUFFER = []

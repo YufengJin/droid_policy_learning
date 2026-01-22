@@ -7,7 +7,7 @@ class AutoencoderKL(nn.Module):
         super().__init__()
         self.scale = scale
         self.shift = shift
-        self.ae = diffusers.AutoencoderKL.from_pretrained(repo, subfolder="vae")
+        self.ae = diffusers.AutoencoderKL.from_pretrained(repo, subfolder="vae", local_files_only=True)
         self.ae.eval()
         self.ae.compile()
         self.ae.requires_grad_(False)

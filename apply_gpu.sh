@@ -1,7 +1,7 @@
 salloc -p a100 --gres=gpu:1 --constraint=a100_80 --time=04:00:00
 
-source /apps/python/3.12-conda/etc/profile.d/conda.sh
-conda activate xil
+source ~/.bashrc 
+conda activate droid_policy_learning_env
 
 export http_proxy=http://proxy.nhr.fau.de:80
 export https_proxy=http://proxy.nhr.fau.de:80

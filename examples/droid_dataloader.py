@@ -12,7 +12,7 @@ from octo.utils.spec import ModuleSpec
 tf.config.set_visible_devices([], "GPU")
 
 # ------------------------------ Get Dataset Information ------------------------------
-DATA_PATH = ""              # UPDATE WITH PATH TO RLDS DATASETS
+DATA_PATH = "/home/atuin/g108ea/g108ea11/datasets/droid_100"              # UPDATE WITH PATH TO RLDS DATASETS
 DATASET_NAMES = ["droid"]   # You can add additional co-training datasets here
 sample_weights = [1]        # Add to this if you add additional co-training datasets
 

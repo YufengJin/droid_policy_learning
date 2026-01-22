@@ -103,6 +103,7 @@ class BaseConfig(Config):
         self.experiment.save.on_best_validation = False             # save models that achieve best validation score
         self.experiment.save.on_best_rollout_return = False         # save models that achieve best rollout return
         self.experiment.save.on_best_rollout_success_rate = True    # save models that achieve best success rate
+        self.experiment.save.final_ckpt_name = None                 # optional final checkpoint name override
 
         # epoch definitions - if not None, set an epoch to be this many gradient steps, else the full dataset size will be used
         self.experiment.epoch_every_n_steps = 100                   # number of gradient steps in train epoch (None for full dataset pass)
@@ -213,6 +214,7 @@ class BaseConfig(Config):
 
         self.train.action_keys = ["actions"]
         self.train.action_shapes = [(1, 1)]
+        self.train.action_type = "cartesian_abs"
 
         # specifing each action keys to load and their corresponding normalization/conversion requirement
         # e.g. for dataset keys "action/eef_pos" and "action/eef_rot"
@@ -261,6 +263,13 @@ class BaseConfig(Config):
         self.train.num_parallel_calls = 200
         self.train.traj_transform_threads = 48
         self.train.traj_read_threads = 48
+        self.train.checkpoint_dir = None
+
+        # DDP support
+        self.train.use_ddp = False
+        # AMP support
+        self.train.use_amp = False
+        self.train.amp_dtype = "bfloat16"
 
     def algo_config(self):
         """

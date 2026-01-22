@@ -3,6 +3,7 @@ A collection of utilities for working with observation dictionaries and
 different kinds of modalities such as images.
 """
 import numpy as np
+import os
 from copy import deepcopy
 from collections import OrderedDict
 
@@ -71,8 +72,9 @@ class ObservationKeyToModalityDict(dict):
     def __getitem__(self, item):
         # If a key doesn't already exist, warn the user and add default mapping
         if item not in self.keys():
-            print(f"ObservationKeyToModalityDict: {item} not found,"
-                  f" adding {item} to mapping with assumed low_dim modality!")
+            if os.environ.get("ROBOMIMIC_QUIET", "0") != "1":
+                print(f"ObservationKeyToModalityDict: {item} not found,"
+                      f" adding {item} to mapping with assumed low_dim modality!")
             self.__setitem__(item, "low_dim")
         return super(ObservationKeyToModalityDict, self).__getitem__(item)
 
@@ -208,9 +210,10 @@ def initialize_obs_utils_with_obs_specs(obs_modality_specs):
     # remove duplicate entries and store in global mapping
     OBS_MODALITIES_TO_KEYS = { obs_modality : list(set(obs_modality_mapping[obs_modality])) for obs_modality in obs_modality_mapping }
 
-    print("\n============= Initialized Observation Utils with Obs Spec =============\n")
-    for obs_modality, obs_keys in OBS_MODALITIES_TO_KEYS.items():
-        print("using obs modality: {} with keys: {}".format(obs_modality, obs_keys))
+    if os.environ.get("ROBOMIMIC_QUIET", "0") != "1":
+        print("\n============= Initialized Observation Utils with Obs Spec =============\n")
+        for obs_modality, obs_keys in OBS_MODALITIES_TO_KEYS.items():
+            print("using obs modality: {} with keys: {}".format(obs_modality, obs_keys))
 
 
 def initialize_default_obs_encoder(obs_encoder_config):
@@ -378,11 +381,14 @@ def process_frame(frame, channel_dim, scale):
         processed_frame (np.array or torch.Tensor): processed frame
     """
     # Channel size should either be 3 (RGB) or 1 (depth) or 6 (goal image RGB)
-    assert (frame.shape[-1] == channel_dim) or (frame.shape[-1] == channel_dim*2)
+    is_hwc = (frame.shape[-1] == channel_dim) or (frame.shape[-1] == channel_dim * 2)
+    is_chw = (frame.shape[-3] == channel_dim) or (frame.shape[-3] == channel_dim * 2)
+    assert is_hwc or is_chw
     frame = TU.to_float(frame)
     frame /= scale
     frame = frame.clip(0.0, 1.0)
-    frame = batch_image_hwc_to_chw(frame)
+    if is_hwc:
+        frame = batch_image_hwc_to_chw(frame)
 
     return frame
 

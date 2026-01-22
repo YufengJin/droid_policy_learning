@@ -92,8 +92,8 @@ class S2FPNBidirectionalFusion(nn.Module):
     """
     S2-FPN Bidirectional Feature Fusion Module.
     
-    Top-Down Path: High semantic -> Low semantic (spatial refinement)
-    Bottom-Up Path: High resolution -> Low resolution (semantic enhancement)
+    Top-Down Path: High semantic → Low semantic (spatial refinement)
+    Bottom-Up Path: High resolution → Low resolution (semantic enhancement)
     
     Args:
         feature_dims: Dict mapping feature keys to channel dimensions
@@ -168,8 +168,8 @@ class S2FPNBidirectionalFusion(nn.Module):
         target_h = max(f.shape[-2] for f in projected.values())
         target_w = max(f.shape[-1] for f in projected.values())
         
-        # Step 2: Top-Down Path (low-res -> high-res, semantic enhancement)
-        # P_low -> upsample -> concat with P_high -> fuse
+        # Step 2: Top-Down Path (low-res → high-res, semantic enhancement)
+        # P_low → upsample → concat with P_high → fuse
         td_features = {}
         td_features[sorted_keys[0]] = projected[sorted_keys[0]]
         
@@ -189,8 +189,8 @@ class S2FPNBidirectionalFusion(nn.Module):
             fused = torch.cat([prev_feat, curr_feat], dim=1)
             td_features[key] = self.td_fuse_blocks[i](fused)
         
-        # Step 3: Bottom-Up Path (high-res -> low-res, geometric detail)
-        # P_high -> downsample -> concat with P_low -> fuse
+        # Step 3: Bottom-Up Path (high-res → low-res, geometric detail)
+        # P_high → downsample → concat with P_low → fuse
         bu_features = {}
         bu_features[sorted_keys[-1]] = td_features[sorted_keys[-1]]
         
@@ -339,15 +339,15 @@ class CleanDIFTImgEncoder(nn.Module):
     
     Architecture:
         Input Image [B, 3, 256, 256]
-            ->
+            ↓
         CleanDIFT Backbone (SD2.1 UNet)
-            ->
-        Multi-scale Features: us3(32^2), us5(64^2), us6(64^2), us8(128^2)
-            ->
+            ↓
+        Multi-scale Features: us3(32²), us5(64²), us6(64²), us8(128²)
+            ↓
         S2-FPN Bidirectional Fusion
-            ->
+            ↓
         Queries Attention Pooling
-            ->
+            ↓
         Global Vector [B, latent_dim]
     
     Args:
@@ -448,30 +448,10 @@ class CleanDIFTImgEncoder(nn.Module):
         # Resolve config file
         if sd_version == "sd15":
             default_yaml = "sd15_feature_extractor.yaml"
-            try:
-                ckpt_pth = hf_hub_download(
-                    repo_id="CompVis/cleandift",
-                    filename="cleandift_sd15_full.safetensors",
-                )
-            except Exception:
-                ckpt_pth = hf_hub_download(
-                    repo_id="CompVis/cleandift",
-                    filename="cleandift_sd15_full.safetensors",
-                    local_files_only=True,
-                )
+            ckpt_pth = hf_hub_download(repo_id="CompVis/cleandift", filename="cleandift_sd15_full.safetensors")
         else:
             default_yaml = "sd21_feature_extractor.yaml"
-            try:
-                ckpt_pth = hf_hub_download(
-                    repo_id="CompVis/cleandift",
-                    filename="cleandift_sd21_full.safetensors",
-                )
-            except Exception:
-                ckpt_pth = hf_hub_download(
-                    repo_id="CompVis/cleandift",
-                    filename="cleandift_sd21_full.safetensors",
-                    local_files_only=True,
-                )
+            ckpt_pth = hf_hub_download(repo_id="CompVis/cleandift", filename="cleandift_sd21_full.safetensors")
         
         here = os.path.dirname(os.path.abspath(__file__))
         yaml_name = yaml_file or default_yaml
@@ -575,7 +555,7 @@ class CleanDIFTImgEncoder(nn.Module):
             device=device,
         )
         
-        # Final projection: [num_queries * fpn_dim] -> [target_dim]
+        # Final projection: [num_queries * fpn_dim] → [target_dim]
         flat_dim = fpn_dim * num_queries
         self.final_proj = nn.Sequential(
             nn.LayerNorm(flat_dim),
@@ -600,7 +580,7 @@ class CleanDIFTImgEncoder(nn.Module):
     # Forward Methods
     # =========================================================================
     
-    def forward(self, x: torch.Tensor, lang_cond=None, alignment_context=None) -> tuple:
+    def forward(self, x: torch.Tensor, lang_cond=None, alignment_context=None) -> torch.Tensor:
         """
         Forward pass.
         
@@ -611,19 +591,18 @@ class CleanDIFTImgEncoder(nn.Module):
             
         Returns:
             features: [B, 1, latent_dim] global features
-            alignment_loss: Optional alignment loss tensor
         """
         x = x.to(self.device, dtype=self.model_dtype)
         caption = lang_cond if self.use_text_condition else None
         
         features = self._extract_features(x, caption)
         
-        # Compute alignment loss if needed
-        alignment_loss = None
+        # Compute alignment loss if needed (but don't return it for compatibility)
         if alignment_context is not None and not self.freeze_backbone:
             alignment_loss = self._compute_alignment_loss(alignment_context, caption)
+            # Could log or handle alignment_loss here if needed
         
-        return features, alignment_loss
+        return features
     
     def _extract_features(self, x: torch.Tensor, caption=None) -> torch.Tensor:
         """Extract and process features through the full pipeline."""
@@ -718,6 +697,11 @@ class CleanDIFTImgEncoder(nn.Module):
         """
         if x.dtype != self.model_dtype:
             x = x.to(self.device, dtype=self.model_dtype)
+        
+        # Debug: Print freeze_backbone state (only once)
+        if not hasattr(self, '_alignment_debug_printed'):
+            print(f"[AlignmentLoss Debug] freeze_backbone = {self.freeze_backbone}")
+            self._alignment_debug_printed = True
         
         # If backbone is frozen, no alignment loss
         if self.freeze_backbone:
@@ -824,3 +808,15 @@ class CleanDIFTImgEncoder(nn.Module):
                 warnings.warn(f"Unexpected keys: {unexpected[:5]}...")
         else:
             warnings.warn(f"No checkpoint found in {checkpoint_dir}")
+
+    def output_shape(self, input_shape=None):
+        """
+        Compute the output shape of the encoder.
+        
+        Args:
+            input_shape: Input shape (not used, kept for compatibility)
+            
+        Returns:
+            Output shape as list [latent_dim]
+        """
+        return [self._multi_feature_out_dim]

@@ -48,7 +48,7 @@ def get_torch_device(try_to_use_cuda):
     """
     if try_to_use_cuda and torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
-        device = torch.device("cuda:0")
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
     else:
         device = torch.device("cpu")
     return device

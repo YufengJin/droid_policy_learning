@@ -26,19 +26,75 @@ def mat_to_rot6d(mat):
     return r6_flat
 
 
-def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+def droid_dataset_transform(trajectory: Dict[str, Any], action_type: str = "cartesian_abs") -> Dict[str, Any]:
     # every input feature is batched, ie has leading batch dimension
-    T = trajectory["action_dict"]["cartesian_position"][:, :3]
-    R = mat_to_rot6d(euler_to_rmat(trajectory["action_dict"]["cartesian_position"][:, 3:6]))
-    trajectory["action"] = tf.concat(
-        (
-            T,
-            R,
-            trajectory["action_dict"]["gripper_position"],
-        ),
-        axis=-1,
-    )
+    action_dict = trajectory["action_dict"]
+    if action_type == "cartesian_abs":
+        T = action_dict["cartesian_position"][:, :3]
+        R = mat_to_rot6d(euler_to_rmat(action_dict["cartesian_position"][:, 3:6]))
+        trajectory["action"] = tf.concat(
+            (
+                T,
+                R,
+                action_dict["gripper_position"],
+            ),
+            axis=-1,
+        )
+    elif action_type == "cartesian_velocity":
+        trajectory["action"] = tf.concat(
+            (
+                action_dict["cartesian_velocity"],
+                action_dict["gripper_position"],
+            ),
+            axis=-1,
+        )
+    elif action_type == "joint_velocity":
+        trajectory["action"] = tf.concat(
+            (
+                action_dict["joint_velocity"],
+                action_dict["gripper_position"],
+            ),
+            axis=-1,
+        )
+    elif action_type == "joint_position":
+        trajectory["action"] = tf.concat(
+            (
+                action_dict["joint_position"],
+                action_dict["gripper_position"],
+            ),
+            axis=-1,
+        )
+    else:
+        raise ValueError(f"Unknown action_type: {action_type}")
     return trajectory
+
+
+def droid_dataset_transform_cartesian_abs(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    return droid_dataset_transform(trajectory, action_type="cartesian_abs")
+
+
+def droid_dataset_transform_cartesian_velocity(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    return droid_dataset_transform(trajectory, action_type="cartesian_velocity")
+
+
+def droid_dataset_transform_joint_velocity(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    return droid_dataset_transform(trajectory, action_type="joint_velocity")
+
+
+def droid_dataset_transform_joint_position(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    return droid_dataset_transform(trajectory, action_type="joint_position")
+
+
+def get_droid_standardize_fn(action_type: str):
+    mapping = {
+        "cartesian_abs": droid_dataset_transform_cartesian_abs,
+        "cartesian_velocity": droid_dataset_transform_cartesian_velocity,
+        "joint_velocity": droid_dataset_transform_joint_velocity,
+        "joint_position": droid_dataset_transform_joint_position,
+    }
+    if action_type not in mapping:
+        raise ValueError(f"Unknown action_type: {action_type}")
+    return mapping[action_type]
 
 
 def robomimic_transform(
@@ -111,6 +167,7 @@ DROID_TO_RLDS_OBS_KEY_MAP = {
 DROID_TO_RLDS_LOW_DIM_OBS_KEY_MAP = {
     "robot_state/cartesian_position": "cartesian_position",
     "robot_state/gripper_position": "gripper_position",
+    "robot_state/joint_position": "joint_position",
 }
 
 class TorchRLDSDataset(torch.utils.data.IterableDataset):
@@ -150,7 +207,23 @@ class TorchRLDSDataset(torch.utils.data.IterableDataset):
         if isinstance(dataset_stats, dict):
             dataset_stats = [dataset_stats]
 
-        lengths = np.array([stats["num_transitions"] for stats in dataset_stats])
+        lengths = []
+        for stats in dataset_stats:
+            if "num_transitions" in stats:
+                lengths.append(stats["num_transitions"])
+            elif "num_samples" in stats:
+                lengths.append(stats["num_samples"])
+            elif "total_transitions" in stats:
+                lengths.append(stats["total_transitions"])
+            elif "total_steps" in stats:
+                lengths.append(stats["total_steps"])
+            elif "steps" in stats:
+                lengths.append(stats["steps"])
+        if not lengths:
+            if not os.environ.get("ROBOMIMIC_QUIET"):
+                print("Warning: Dataset statistics missing length keys; using shuffle_buffer_size estimate.")
+            return self._shuffle_buffer_size if self._shuffle_buffer_size is not None else 100000
+        lengths = np.array(lengths)
         if hasattr(self._rlds_dataset, "sample_weights"):
             lengths *= np.array(self._rlds_dataset.sample_weights)
         total_len = lengths.sum()

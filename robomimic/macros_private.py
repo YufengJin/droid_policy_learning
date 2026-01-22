@@ -1,6 +1,7 @@
 """
 Set of global variables shared across robomimic
 """
+import os
 # Sets debugging mode. Should be set at top-level script so that internal
 # debugging functionalities are made active
 DEBUG = False
@@ -9,11 +10,11 @@ DEBUG = False
 VISUALIZE_RANDOMIZER = False
 
 # wandb entity (eg. username or team name)
-WANDB_ENTITY = 'yufeng-jin'
+WANDB_ENTITY = os.environ.get("WANDB_ENTITY", "820017785-tu-darmstadt")
 
 # wandb api key (obtain from https://wandb.ai/authorize)
 # alternatively, set up wandb from terminal with `wandb login`
-WANDB_API_KEY = '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'
+WANDB_API_KEY = os.environ.get("WANDB_API_KEY")
 
 try:
     from robomimic.macros_private import *

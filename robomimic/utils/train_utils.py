@@ -48,6 +48,13 @@ def get_exp_dir(config, auto_remove_exp_dir=False):
     # timestamp for directory names
     t_now = time.time()
     time_str = datetime.datetime.fromtimestamp(t_now).strftime('%Y%m%d%H%M%S')
+    is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+    rank = torch.distributed.get_rank() if is_distributed else 0
+    is_main_process = (rank == 0)
+    if is_distributed:
+        time_payload = [time_str] if is_main_process else [None]
+        torch.distributed.broadcast_object_list(time_payload, src=0)
+        time_str = time_payload[0]
 
     # create directory for where to dump model parameters, tensorboard logs, and videos
     base_output_dir = os.path.expanduser(config.train.output_dir)
@@ -55,32 +62,43 @@ def get_exp_dir(config, auto_remove_exp_dir=False):
         # relative paths are specified relative to robomimic module location
         base_output_dir = os.path.join(robomimic.__path__[0], base_output_dir)
     base_output_dir = os.path.join(base_output_dir, config.experiment.name)
-    if os.path.exists(base_output_dir):
+    if is_main_process and os.path.exists(base_output_dir):
         if not auto_remove_exp_dir:
-            ans = input("WARNING: model directory ({}) already exists! \noverwrite? (y/n)\n".format(base_output_dir))
+            # 自动覆盖已存在的目录,不再询问
+            ans = "y"
         else:
             ans = "y"
         if ans == "y":
-            print("REMOVING")
+            # print("REMOVING")  # 减少不必要的输出
             shutil.rmtree(base_output_dir)
+    if is_main_process:
+        os.makedirs(base_output_dir, exist_ok=True)
+    if is_distributed:
+        torch.distributed.barrier()
 
     # only make model directory if model saving is enabled
     output_dir = None
     if config.experiment.save.enabled:
         output_dir = os.path.join(base_output_dir, time_str, "models")
-        os.makedirs(output_dir)
+        if is_main_process:
+            os.makedirs(output_dir, exist_ok=True)
 
     # tensorboard directory
     log_dir = os.path.join(base_output_dir, time_str, "logs")
-    os.makedirs(log_dir)
+    if is_main_process:
+        os.makedirs(log_dir, exist_ok=True)
 
     # video directory
     video_dir = os.path.join(base_output_dir, time_str, "videos")
-    os.makedirs(video_dir)
+    if is_main_process:
+        os.makedirs(video_dir, exist_ok=True)
 
     # vis directory
     vis_dir = os.path.join(base_output_dir, time_str, "vis")
-    os.makedirs(vis_dir)
+    if is_main_process:
+        os.makedirs(vis_dir, exist_ok=True)
+    if is_distributed:
+        torch.distributed.barrier()
     
     return log_dir, output_dir, video_dir, vis_dir
 
@@ -609,8 +627,14 @@ def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_nor
         model.set_eval()
     else:
         model.set_train()
-    # if num_steps is None:
-    #     num_steps = len(data_loader)
+    if num_steps is None:
+        try:
+            num_steps = len(data_loader)
+        except TypeError:
+            raise ValueError(
+                "num_steps is None and data_loader has no length. "
+                "Set --steps_per_epoch to a fixed value."
+            )
 
     step_log_all = []
     timing_stats = dict(Data_Loading=[], Process_Batch=[], Train_Batch=[], Log_Info=[])

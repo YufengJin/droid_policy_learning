@@ -17,6 +17,8 @@ Args:
 
 import argparse
 import json
+import math
+import imageio.v2 as imageio
 import numpy as np
 import time
 import os
@@ -45,7 +47,7 @@ from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
 from robomimic.utils.rlds_utils import (
-    droid_dataset_transform,
+    get_droid_standardize_fn,
     robomimic_transform,
     DROID_TO_RLDS_OBS_KEY_MAP,
     DROID_TO_RLDS_LOW_DIM_OBS_KEY_MAP,
@@ -55,6 +57,21 @@ from robomimic.utils.rlds_utils import (
 from octo.data.dataset import make_dataset_from_rlds, make_interleaved_dataset
 from octo.data.utils.data_utils import combine_dataset_statistics
 from octo.utils.spec import ModuleSpec
+
+
+def _get_rank_info():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return True, torch.distributed.get_rank(), torch.distributed.get_world_size()
+    rank_env = os.environ.get("RANK")
+    world_env = os.environ.get("WORLD_SIZE")
+    if rank_env is not None:
+        try:
+            rank = int(rank_env)
+            world = int(world_env) if world_env is not None else 1
+            return True, rank, world
+        except ValueError:
+            pass
+    return False, 0, 1
 
 
 def train(config, device):
@@ -68,18 +85,39 @@ def train(config, device):
 
     # set num workers
     torch.set_num_threads(1)
+    quiet = os.environ.get("ROBOMIMIC_QUIET", "0") == "1"
+    _, rank, world_size = _get_rank_info()
+    is_main_process = (rank == 0)
 
-    print("\n============= New Training Run with Config =============")
-    print(config)
-    print("")
+    def _stage_log(message):
+        if is_main_process:
+            print(message, flush=True)
+
+    # print("\n============= New Training Run with Config =============")
+    # print(config)
+    # print("")
     log_dir, ckpt_dir, video_dir, vis_dir = TrainUtils.get_exp_dir(config)
-    if getattr(config.train, "checkpoint_dir", None):
-        ckpt_dir = os.path.expanduser(config.train.checkpoint_dir)
+    if is_main_process:
+        _stage_log(f"Log dir: {log_dir}")
+        if ckpt_dir:
+            _stage_log(f"Checkpoint dir: {ckpt_dir}")
+        final_name = None
+        try:
+            final_name = config.experiment.save.get("final_ckpt_name", None)
+        except Exception:
+            final_name = getattr(config.experiment.save, "final_ckpt_name", None)
+        if ckpt_dir and final_name:
+            _stage_log(f"Final checkpoint: {os.path.join(ckpt_dir, final_name + '.pth')}")
+    checkpoint_dir = config.train.get("checkpoint_dir", None)
+    if checkpoint_dir:
+        ckpt_dir = os.path.expanduser(checkpoint_dir)
         os.makedirs(ckpt_dir, exist_ok=True)
 
     if config.experiment.logging.terminal_output_to_txt:
         # log stdout and stderr to a text file
-        logger = PrintLogger(os.path.join(log_dir, 'log.txt'))
+        _, rank, _ = _get_rank_info()
+        log_name = "log.txt" if rank == 0 else "log_rank{}.txt".format(rank)
+        logger = PrintLogger(os.path.join(log_dir, log_name))
         sys.stdout = logger
         sys.stderr = logger
 
@@ -122,6 +160,20 @@ def train(config, device):
         action_config = config.train.action_config
         is_abs_action = [True] * ac_dim
 
+        def _infer_action_type(action_keys):
+            if "action/joint_velocity" in action_keys:
+                return "joint_velocity"
+            if "action/joint_position" in action_keys:
+                return "joint_position"
+            if "action/cartesian_velocity" in action_keys:
+                return "cartesian_velocity"
+            return "cartesian_abs"
+
+        action_type = getattr(config.train, "action_type", None)
+        if not action_type:
+            action_type = _infer_action_type(config.train.action_keys)
+        standardize_fn = get_droid_standardize_fn(action_type)
+
         BASE_DATASET_KWARGS = {
                 "data_dir": config.train.data_path,
                 "image_obs_keys": {"primary": DROID_TO_RLDS_OBS_KEY_MAP[obs_modalities[0]], "secondary": DROID_TO_RLDS_OBS_KEY_MAP[obs_modalities[1]]},
@@ -131,7 +183,7 @@ def train(config, device):
                 "action_proprio_normalization_type": "bounds",
                 "absolute_action_mask": is_abs_action,
                 "action_normalization_mask": is_abs_action,
-                "standardize_fn": droid_dataset_transform,
+                "standardize_fn": standardize_fn,
          }
 
         dataset_names = config.train.dataset_names
@@ -142,11 +194,12 @@ def train(config, device):
         dataset_kwargs_list = [
             {"name": d_name, "filter_functions": f_functions, **BASE_DATASET_KWARGS} for d_name, f_functions in zip(dataset_names, filter_functions)
         ]
+        _stage_log("Loading RLDS datasets (computing stats)...")
         # Compute combined normalization stats
-        combined_dataset_statistics = combine_dataset_statistics(
-            [make_dataset_from_rlds(**dataset_kwargs, train=True)[1] for dataset_kwargs in dataset_kwargs_list]
-        )
+        dataset_stats_list = [make_dataset_from_rlds(**dataset_kwargs, train=True)[1] for dataset_kwargs in dataset_kwargs_list]
+        combined_dataset_statistics = combine_dataset_statistics(dataset_stats_list)
 
+        _stage_log("Building RLDS data pipeline...")
         dataset = make_interleaved_dataset(
             dataset_kwargs_list,
             config.train.sample_weights,
@@ -175,9 +228,18 @@ def train(config, device):
             traj_transform_threads=config.train.traj_transform_threads,
             traj_read_threads=config.train.traj_read_threads,
         )
+        if world_size > 1:
+            _stage_log(f"Sharding RLDS dataset: rank {rank}/{world_size}")
+            dataset = dataset.shard(num_shards=world_size, index=rank)
         # Note: If we have separated statistics for multiple datasets, use the first one (assumed to be DROID)
         # Otherwise, use the combined dataset statistics.
-        rlds_dataset_stats = dataset.dataset_statistics[0] if isinstance(dataset.dataset_statistics, list) else dataset.dataset_statistics
+        rlds_dataset_stats = None
+        if isinstance(dataset_stats_list, list) and len(dataset_stats_list) > 0:
+            rlds_dataset_stats = dataset_stats_list[0]
+        elif isinstance(dataset_stats_list, dict):
+            rlds_dataset_stats = dataset_stats_list
+        else:
+            rlds_dataset_stats = combined_dataset_statistics
         action_stats = ActionUtils.get_action_stats_dict(rlds_dataset_stats["action"], config.train.action_keys, config.train.action_shapes)
         action_normalization_stats = action_stats_to_normalization_stats(action_stats, action_config)
         has_proprio = len(config.observation.modalities.obs.low_dim) > 0
@@ -193,16 +255,99 @@ def train(config, device):
             num_parallel_calls=config.train.traj_transform_threads,
         )
 
-        pytorch_dataset = TorchRLDSDataset(dataset)
+        _stage_log("Wrapping RLDS dataset for PyTorch...")
+        def _estimate_dataset_len(stats_list, sample_weights):
+            lengths = []
+            for stats in stats_list:
+                if not isinstance(stats, dict):
+                    continue
+                for key in ("num_transitions", "num_samples", "total_transitions", "total_steps", "steps"):
+                    if key in stats:
+                        lengths.append(stats[key])
+                        break
+            if not lengths:
+                return None
+            lengths = np.array(lengths, dtype=np.float64)
+            if sample_weights is not None and len(sample_weights) == len(lengths):
+                lengths *= np.array(sample_weights, dtype=np.float64)
+            return int(lengths.sum())
+
+        dataset_len = _estimate_dataset_len(dataset_stats_list, config.train.sample_weights)
+        if dataset_len is not None:
+            _stage_log(f"Estimated dataset_len from stats (global): {dataset_len}")
+            if world_size > 1:
+                dataset_len = int(math.ceil(dataset_len / float(world_size)))
+                _stage_log(f"Estimated dataset_len per-rank: {dataset_len}")
+        else:
+            _stage_log("Estimated dataset_len unavailable; falling back to shuffle_buffer_size.")
+        pytorch_dataset = TorchRLDSDataset(dataset, dataset_length=dataset_len)
         train_loader = DataLoader(
             pytorch_dataset,
             batch_size=config.train.batch_size,
             num_workers=0,  # important to keep this to 0 so PyTorch does not mess with the parallelism
         )
+        if config.experiment.epoch_every_n_steps is None:
+            try:
+                dataset_len = len(pytorch_dataset)
+                batch_size = float(config.train.batch_size)
+                steps = int(math.ceil(dataset_len / batch_size))
+                with config.values_unlocked():
+                    config.experiment.epoch_every_n_steps = max(1, steps)
+                _stage_log(
+                    "Auto steps_per_epoch: {} (dataset_len={}, batch_size={}, world_size={}, global_batch={})".format(
+                        config.experiment.epoch_every_n_steps,
+                        dataset_len,
+                        int(batch_size),
+                        int(world_size),
+                        int(batch_size) * int(world_size),
+                    )
+                )
+            except Exception as exc:
+                _stage_log(
+                    "Auto steps_per_epoch failed ({}: {}); please set --steps_per_epoch explicitly.".format(
+                        type(exc).__name__,
+                        exc,
+                    )
+                )
 
         # For RLDS, get batch from train loader to compute shapes
+        _stage_log("Warming up dataloader (first batch)...")
         data_loader_iter = iter(train_loader)
         rlds_batch = next(data_loader_iter)
+        if is_main_process:
+            preview_count = int(os.environ.get("ROBOMIMIC_PREVIEW_IMAGES", "4"))
+            if preview_count > 0:
+                preview_dir = os.path.join(os.getcwd(), "preview")
+                os.makedirs(preview_dir, exist_ok=True)
+                obs_dict = rlds_batch.get("obs", {})
+                if isinstance(obs_dict, dict):
+                    camera_keys = list(obs_modalities)
+                    available_keys = [k for k in camera_keys if k in obs_dict]
+                    if available_keys:
+                        sample_tensor = obs_dict[available_keys[0]]
+                        if hasattr(sample_tensor, "shape"):
+                            batch_size = int(sample_tensor.shape[0])
+                            num_samples = min(preview_count, batch_size)
+                            if num_samples > 0:
+                                indices = np.random.choice(batch_size, size=num_samples, replace=False)
+                                for cam_key in available_keys:
+                                    cam_tensor = obs_dict[cam_key]
+                                    for i, idx in enumerate(indices):
+                                        frame = cam_tensor[idx, 0]
+                                        if isinstance(frame, np.ndarray):
+                                            frame = torch.from_numpy(frame)
+                                        if torch.is_tensor(frame):
+                                            if frame.ndim == 3 and frame.shape[0] in (1, 3):
+                                                frame = frame.permute(1, 2, 0)
+                                            frame = frame.float()
+                                            if frame.min() < 0:
+                                                frame = (frame + 1.0) / 2.0
+                                            frame = frame.clamp(0, 1).mul(255).byte().cpu().numpy()
+                                        if not isinstance(frame, np.ndarray):
+                                            continue
+                                        filename = "{}_sample_{}.png".format(cam_key.replace("/", "_"), i)
+                                        imageio.imwrite(os.path.join(preview_dir, filename), frame)
+        _stage_log("Dataloader ready, starting training...")
 
         shape_meta = FileUtils.get_shape_metadata_from_dataset(
             dataset_path=None,
@@ -210,7 +355,7 @@ def train(config, device):
             action_keys=config.train.action_keys,
             all_obs_keys=config.all_obs_keys,
             ds_format=ds_format,
-            verbose=True,
+            verbose=not quiet,
             config = config
         )
     else:
@@ -222,7 +367,8 @@ def train(config, device):
             raise Exception("Dataset at provided path {} not found!".format(dataset_path))
 
         # # load basic metadata from training file
-        print("\n============= Loaded Environment Metadata =============")
+        if not quiet:
+            print("\n============= Loaded Environment Metadata =============")
         env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=dataset_path, ds_format=ds_format)
 
         # update env meta if applicable
@@ -236,20 +382,22 @@ def train(config, device):
             action_keys=config.train.action_keys,
             all_obs_keys=config.all_obs_keys,
             ds_format=ds_format,
-            verbose=True,
+            verbose=not quiet,
             config = config
         )
         # load training data
         trainset, validset = TrainUtils.load_data_for_training(
             config, obs_keys=shape_meta["all_obs_keys"])
         train_sampler = trainset.get_dataset_sampler()
-        print("\n============= Training Dataset =============")
-        print(trainset)
-        print("")
-        if validset is not None:
-            print("\n============= Validation Dataset =============")
-            print(validset)
+        if not quiet:
+            print("\n============= Training Dataset =============")
+            print(trainset)
             print("")
+        if validset is not None:
+            if not quiet:
+                print("\n============= Validation Dataset =============")
+                print(validset)
+                print("")
 
         # # maybe retreve statistics for normalizing observations
         obs_normalization_stats = None
@@ -271,10 +419,11 @@ def train(config, device):
 
     if config.experiment.env is not None:
         env_meta["env_name"] = config.experiment.env
-        print("=" * 30 + "\n" + "Replacing Env to {}\n".format(env_meta["env_name"]) + "=" * 30)
+        if not quiet:
+            print("=" * 30 + "\n" + "Replacing Env to {}\n".format(env_meta["env_name"]) + "=" * 30)
 
     if config.experiment.rollout.enabled and ("env_name" not in env_meta):
-        if not os.environ.get("ROBOMIMIC_QUIET"):
+        if not quiet:
             print("Rollouts disabled: env metadata not available for this data format.")
         config.experiment.rollout.enabled = False
 
@@ -298,9 +447,11 @@ def train(config, device):
             )
             env = EnvUtils.wrap_env_from_config(env, config=config) # apply environment warpper, if applicable
             envs[env.name] = env
-            print(envs[env.name])
+            if not quiet:
+                print(envs[env.name])
 
-    print("")
+    if not quiet:
+        print("")
 
     # setup for a new training run
     data_logger = DataLogger(
@@ -317,21 +468,28 @@ def train(config, device):
         device=device,
     )
     
-    # save the config as a json file
-    with open(os.path.join(log_dir, '..', 'config.json'), 'w') as outfile:
-        json.dump(config, outfile, indent=4)
+    # save the config as a json file (rank0 only)
+    if is_main_process:
+        config_dir = os.path.normpath(os.path.join(log_dir, '..'))
+        os.makedirs(config_dir, exist_ok=True)
+        config_path = os.path.join(config_dir, 'config.json')
+        with open(config_path, 'w') as outfile:
+            json.dump(config, outfile, indent=4)
+        _stage_log(f"Config saved to: {config_path}")
 
     # if checkpoint is specified, load in model weights
     ckpt_path = config.experiment.ckpt_path
     if ckpt_path is not None:
-        print("LOADING MODEL WEIGHTS FROM " + ckpt_path)
+        if not quiet:
+            print("LOADING MODEL WEIGHTS FROM " + ckpt_path)
         from robomimic.utils.file_utils import maybe_dict_from_checkpoint
         ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
         model.deserialize(ckpt_dict["model"])
 
-    print("\n============= Model Summary =============")
-    print(model)  # print model summary
-    print("")
+    if not quiet:
+        print("\n============= Model Summary =============")
+        print(model)  # print model summary
+        print("")
 
     ##### ------------------------------------------------------------------------------------ ######
 
@@ -352,11 +510,14 @@ def train(config, device):
         valid_loader = None
 
     # print all warnings before training begins
-    print("*" * 50)
-    print("Warnings generated by robomimic have been duplicated here (from above) for convenience. Please check them carefully.")
-    flush_warnings()
-    print("*" * 50)
-    print("")
+    if not quiet:
+        print("*" * 50)
+        print("Warnings generated by robomimic have been duplicated here (from above) for convenience. Please check them carefully.")
+        flush_warnings()
+        print("*" * 50)
+        print("")
+    else:
+        flush_warnings()
 
     # main training loop
     best_valid_loss = None
@@ -370,18 +531,25 @@ def train(config, device):
 
     data_loader_iter = iter(train_loader)
     for epoch in range(1, config.train.num_epochs + 1): # epoch numbers start at 1
+        _stage_log(f"Epoch {epoch}/{config.train.num_epochs} (remaining {config.train.num_epochs - epoch})")
         step_log, data_loader_iter = TrainUtils.run_epoch(
             model=model,
             data_loader=train_loader,
             epoch=epoch,
             num_steps=train_num_steps,
             obs_normalization_stats=obs_normalization_stats,
-            data_loader_iter = data_loader_iter
+            data_loader_iter = data_loader_iter,
         )
         model.on_epoch_end(epoch)
 
         # setup checkpoint path
         epoch_ckpt_name = "model_epoch_{}".format(epoch)
+        try:
+            final_ckpt_name = config.experiment.save.get("final_ckpt_name", None)
+        except Exception:
+            final_ckpt_name = getattr(config.experiment.save, "final_ckpt_name", None)
+        if final_ckpt_name and epoch == config.train.num_epochs:
+            epoch_ckpt_name = final_ckpt_name
 
         # check for recurring checkpoint saving conditions
         should_save_ckpt = False
@@ -397,8 +565,9 @@ def train(config, device):
             last_ckpt_time = time.time()
             ckpt_reason = "time"
 
-        print("Train Epoch {}".format(epoch))
-        print(json.dumps(step_log, sort_keys=True, indent=4))
+        if not quiet:
+            print("Train Epoch {}".format(epoch))
+            print(json.dumps(step_log, sort_keys=True, indent=4))
         for k, v in step_log.items():
             if k.startswith("Time_"):
                 data_logger.record("Timing_Stats/Train_{}".format(k[5:]), v, epoch)
@@ -415,8 +584,9 @@ def train(config, device):
                 else:
                     data_logger.record("Valid/{}".format(k), v, epoch)
 
-            print("Validation Epoch {}".format(epoch))
-            print(json.dumps(step_log, sort_keys=True, indent=4))
+            if not quiet:
+                print("Validation Epoch {}".format(epoch))
+                print(json.dumps(step_log, sort_keys=True, indent=4))
 
             # save checkpoint if achieve new best validation loss
             valid_check = "Loss" in step_log
@@ -464,9 +634,10 @@ def train(config, device):
                     else:
                         data_logger.record("Rollout/{}/{}".format(k, env_name), v, epoch, log_stats=True)
 
-                print("\nEpoch {} Rollouts took {}s (avg) with results:".format(epoch, rollout_logs["time"]))
-                print('Env: {}'.format(env_name))
-                print(json.dumps(rollout_logs, sort_keys=True, indent=4))
+                if not quiet:
+                    print("\nEpoch {} Rollouts took {}s (avg) with results:".format(epoch, rollout_logs["time"]))
+                    print('Env: {}'.format(env_name))
+                    print(json.dumps(rollout_logs, sort_keys=True, indent=4))
 
             # checkpoint and video saving logic
             updated_stats = TrainUtils.should_save_from_rollout_logs(
@@ -494,7 +665,8 @@ def train(config, device):
                 if config.experiment.mse.on_save_ckpt and should_save_ckpt:
                     should_save_mse = True
             if should_save_mse:
-                print("Computing MSE ...")
+                if not quiet:
+                    print("Computing MSE ...")
                 if config.experiment.mse.visualize:
                     save_vis_dir = os.path.join(vis_dir, epoch_ckpt_name)
                 else:
@@ -512,8 +684,9 @@ def train(config, device):
                     data_logger.record("{}".format(k), v, epoch, data_type='image')
 
 
-                print("MSE Log Epoch {}".format(epoch))
-                print(json.dumps(mse_log, sort_keys=True, indent=4))
+                if not quiet:
+                    print("MSE Log Epoch {}".format(epoch))
+                    print(json.dumps(mse_log, sort_keys=True, indent=4))
         else:
             should_save_batch_samples = False
             # TODO(Ashwin): eventually clean up to use different config parameters for
@@ -524,7 +697,8 @@ def train(config, device):
                 if config.experiment.mse.on_save_ckpt and should_save_ckpt:
                     should_save_batch_samples = True
             if should_save_batch_samples:
-                print("Computing Batch Visualization ...")
+                if not quiet:
+                    print("Computing Batch Visualization ...")
                 if config.experiment.mse.visualize:
                     save_vis_dir = os.path.join(vis_dir, epoch_ckpt_name)
                 else:
@@ -538,7 +712,8 @@ def train(config, device):
                 for k, v in vis_log.items():
                     data_logger.record("{}".format(k), v, epoch, data_type='image')
 
-                print("Batch Log Epoch {}".format(epoch))
+                if not quiet:
+                    print("Batch Log Epoch {}".format(epoch))
         
         # Only keep saved videos if the ckpt should be saved (but not because of validation score)
         should_save_video = (should_save_ckpt and (ckpt_reason != "valid")) or config.experiment.keep_all_videos
@@ -547,28 +722,33 @@ def train(config, device):
                 os.remove(video_paths[env_name])
 
         # Save model checkpoints based on conditions (success rate, validation loss, etc)
-        if should_save_ckpt:    
-            TrainUtils.save_model(
-                model=model,
-                config=config,
-                env_meta=env_meta,
-                shape_meta=shape_meta,
-                ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
-                obs_normalization_stats=obs_normalization_stats,
-                action_normalization_stats=action_normalization_stats,
-            )
+        if should_save_ckpt:
+            if is_main_process:
+                TrainUtils.save_model(
+                    model=model,
+                    config=config,
+                    env_meta=env_meta,
+                    shape_meta=shape_meta,
+                    ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
+                    obs_normalization_stats=obs_normalization_stats,
+                    action_normalization_stats=action_normalization_stats,
+                )
+            elif not quiet:
+                print("Skipping checkpoint save on non-main rank.")
 
         # Finally, log memory usage in MB
         process = psutil.Process(os.getpid())
         mem_usage = int(process.memory_info().rss / 1000000)
         data_logger.record("System/RAM Usage (MB)", mem_usage, epoch)
-        print("\nEpoch {} Memory Usage: {} MB\n".format(epoch, mem_usage))
+        if not quiet:
+            print("\nEpoch {} Memory Usage: {} MB\n".format(epoch, mem_usage))
 
     # terminate logging
     data_logger.close()
 
 
 def main(args):
+    quiet = os.environ.get("ROBOMIMIC_QUIET", "0") == "1"
 
     if args.config is not None:
         ext_cfg = json.load(open(args.config, 'r'))
@@ -619,7 +799,8 @@ def main(args):
         train(config, device=device)
     except Exception as e:
         res_str = "run failed with error:\n{}\n\n{}".format(e, traceback.format_exc())
-    print(res_str)
+    if (not quiet) or ("run failed" in res_str):
+        print(res_str)
 
 
 if __name__ == "__main__":
