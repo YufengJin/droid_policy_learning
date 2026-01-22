@@ -1,0 +1,128 @@
+Bootstrap: docker
+From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
+
+%labels
+    Author Droid_Dev
+    Version 1.7
+    Description Droid Policy Learning (External Entrypoint)
+
+%environment
+    export DEBIAN_FRONTEND=noninteractive
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export ENV_NAME=droid_env
+    export HOME=/root
+    # 将 /usr/local/bin 放在最前面，确保能找到 micromamba
+    export PATH=/usr/local/bin:/opt/conda/envs/droid_env/bin:/opt/conda/bin:$PATH
+    export HF_HOME=/root/.cache/huggingface
+
+%post
+    # --- 基础配置 ---
+    export DEBIAN_FRONTEND=noninteractive
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    export ENV_NAME=droid_env
+    export PATH=/usr/local/bin:/opt/conda/bin:$PATH
+
+    # 1. 安装系统依赖
+    apt-get update && apt-get install -y \
+        curl wget bzip2 ca-certificates git build-essential cmake unzip ffmpeg \
+        libgl1-mesa-glx libglib2.0-0 vim tzdata
+    rm -rf /var/lib/apt/lists/*
+
+    # 2. [稳健安装] Micromamba
+    # 拆分下载步骤，确保文件正确
+    echo ">> Downloading Micromamba..."
+    mkdir -p /usr/local/bin
+    if curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest -o /tmp/micromamba.tar.bz2; then
+        echo ">> Extracting Micromamba..."
+        tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba -f /tmp/micromamba.tar.bz2
+        chmod +x /usr/local/bin/micromamba
+        rm /tmp/micromamba.tar.bz2
+        
+        # 立即验证
+        if [ -x "/usr/local/bin/micromamba" ]; then
+            echo ">> Micromamba installed successfully at /usr/local/bin/micromamba"
+        else
+            echo ">> ERROR: Micromamba binary not found after extraction!"
+            exit 1
+        fi
+    else
+        echo ">> ERROR: Failed to download Micromamba!"
+        exit 1
+    fi
+
+    # 3. 创建环境
+    micromamba create -y -n $ENV_NAME python=3.10.* -c conda-forge
+    micromamba clean -a -y
+    
+    # 刷新 PATH
+    export PATH=/opt/conda/envs/$ENV_NAME/bin:$PATH
+
+    # 4. Octo 源码
+    mkdir -p /opt/third_party && cd /opt/third_party
+    git clone https://github.com/octo-models/octo.git
+    cd octo && git checkout 85b83fc19657ab407a7f56558a5384ae56fe453b
+
+    # 5. PyTorch & JAX
+    pip install --upgrade pip
+    pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+    pip install --upgrade "jax[cuda11_pip]==0.4.20" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+    # 6. Python 依赖
+    pip install cmake
+    pip install "numpy==1.24.3" h5py psutil tqdm termcolor tensorboard tensorboardX imageio imageio-ffmpeg matplotlib \
+        "diffusers==0.11.1" opencv-python "transformers==4.34.0" gym "ml_dtypes==0.2.0" "chex==0.1.85" "optax==0.1.5" \
+        "tensorflow_probability==0.23.0" "tensorflow==2.15.0" "distrax==0.1.5" "flax==0.7.5" ml_collections absl-py scipy \
+        wandb einops moviepy "pre-commit==3.3.3" tensorflow_hub tensorflow_text "tensorflow_datasets==4.9.2" \
+        "tensorflow_graphics==2021.12.3" "dlimp@git+https://github.com/kvablack/dlimp@5edaa4691567873d495633f2708982b42edf1972" plotly
+
+    export CMAKE_POLICY_VERSION_MINIMUM=3.5
+    pip install --no-build-isolation 'egl_probe>=1.0.1'
+
+    # 7. 安装 Octo
+    pip install -e /opt/third_party/octo
+
+    # 7.1 预安装 Robomimic
+    cd /opt/third_party
+    git clone https://github.com/ARISE-Initiative/robomimic.git
+    cd robomimic
+    pip install --no-build-isolation -e .
+
+    # 8. 创建挂载点
+    mkdir -p /workspace/droid_policy_learning
+    mkdir -p /workspace/datasets/droid
+    mkdir -p /root/.cache/huggingface
+
+    # ===========================================================
+    # 配置 /etc/bash.bashrc (用于 apptainer shell)
+    # ===========================================================
+    cat >> /etc/bash.bashrc << 'EOF'
+export MAMBA_ROOT_PREFIX=/opt/conda
+# 尝试找到 micromamba
+if [ -x "/usr/local/bin/micromamba" ]; then
+    MAMBA_EXE="/usr/local/bin/micromamba"
+elif command -v micromamba >/dev/null 2>&1; then
+    MAMBA_EXE=$(command -v micromamba)
+fi
+
+if [ -n "$MAMBA_EXE" ]; then
+    eval "$($MAMBA_EXE shell hook --shell bash)"
+    micromamba activate droid_env
+fi
+EOF
+
+%runscript
+    # 使用挂载的 entrypoint.sh（通过 bind mount 访问）
+    # 如果挂载的 entrypoint.sh 不存在，使用镜像内的备选方案
+    if [ -f "/workspace/droid_policy_learning/apptainer/entrypoint.sh" ]; then
+        exec /workspace/droid_policy_learning/apptainer/entrypoint.sh "$@"
+    else
+        # 备选方案：直接激活环境并执行命令
+        export MAMBA_ROOT_PREFIX=/opt/conda
+        if [ -x "/usr/local/bin/micromamba" ]; then
+            eval "$(/usr/local/bin/micromamba shell hook --shell bash)"
+            micromamba activate droid_env
+        fi
+        exec "$@"
+    fi
