@@ -5,113 +5,13 @@ import math
 import os
 import sys
 import time
-import warnings
-
 import torch
 
 from robomimic.config import config_factory
 from robomimic.scripts.train import train
 
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("ABSL_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("ABSL_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("TF_CPP_MIN_VLOG_LEVEL", "3")
-os.environ.setdefault("GLOG_minloglevel", "3")
-os.environ.setdefault("ROBOMIMIC_QUIET", "1")
 os.environ.setdefault("TORCH_FX_DISABLE_SYMBOLIC_SHAPES", "1")
-
-warnings.filterwarnings(
-    "ignore",
-    message="The parameter 'pretrained' is deprecated*",
-    category=UserWarning,
-    module=r"torchvision\\.models\\._utils",
-)
-warnings.filterwarnings(
-    "ignore",
-    message="Arguments other than a weight enum*",
-    category=UserWarning,
-    module=r"torchvision\\.models\\._utils",
-)
-warnings.filterwarnings(
-    "ignore",
-    message="The given NumPy array is not writable*",
-    category=UserWarning,
-    module=r"torch\\.utils\\.data\\._utils\\.collate",
-)
-
-
-class _FilteredStream:
-    def __init__(self, stream, patterns, drop_blank=False):
-        self._stream = stream
-        self._patterns = patterns
-        self._drop_blank = drop_blank
-        self._buffer = ""
-        self._last_was_blank = False
-
-    def write(self, data):
-        if not data:
-            return 0
-        self._buffer += data
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            if not self._should_filter(line):
-                self._stream.write(line + "\n")
-                self._last_was_blank = False
-        return len(data)
-
-    def flush(self):
-        if self._buffer:
-            if not self._should_filter(self._buffer):
-                self._stream.write(self._buffer)
-                self._last_was_blank = False
-            self._buffer = ""
-        self._stream.flush()
-
-    def _should_filter(self, line):
-        text = line.strip()
-        if not text:
-            if self._drop_blank or self._last_was_blank:
-                return True
-            self._last_was_blank = True
-            return False
-        for pattern in self._patterns:
-            if pattern in line:
-                return True
-        if text.startswith("#") and text.endswith("#"):
-            return True
-        return False
-
-    def __getattr__(self, name):
-        return getattr(self._stream, name)
-
-
-def _install_output_filter(drop_blank=False):
-    patterns = [
-        "CleanDIFT backbone not available",
-        "CUDA-enabled jaxlib is not installed",
-        "An NVIDIA GPU may be present on this machine, but a CUDA-enabled jaxlib is not installed",
-        "The given NumPy array is not writable",
-        "The parameter 'pretrained' is deprecated",
-        "Arguments other than a weight enum",
-        "ObservationKeyToModalityDict:",
-        "warnings.warn(",
-        "return collate([torch.as_tensor",
-        "Cannot dlopen some GPU libraries",
-        "Skipping registering GPU devices",
-        "All log messages before absl::InitializeLog()",
-        "tf_record_dataset_op.cc",
-        "shuffle_dataset_op.cc",
-        "Filling up shuffle buffer",
-        "Shuffle buffer filled",
-        "local_rendezvous.cc",
-        "Setting OMP_NUM_THREADS environment variable",
-        "Loading the following",
-        "datasets (incl. sampling weight)",
-        "STDOUT will be forked to",
-        "not in var_ranges",
-    ]
-    sys.stdout = _FilteredStream(sys.stdout, patterns, drop_blank=drop_blank)
-    sys.stderr = _FilteredStream(sys.stderr, patterns, drop_blank=drop_blank)
+os.environ.setdefault("ROBOMIMIC_STAGE_LOG", "0")
 
 
 def _expand_path(path: str) -> str:
@@ -374,6 +274,9 @@ def build_config(args):
     config.train.action_config = action_config
     config.train.action_type = args.action_type
     config.train.output_dir = log_root
+    if args.language_prompt is not None:
+        with config.unlocked():
+            config.train.language_prompt = args.language_prompt
     if args.checkpoint_dir:
         config.train.checkpoint_dir = _expand_path(args.checkpoint_dir)
 
@@ -406,11 +309,16 @@ def build_config(args):
         config.observation.encoder.rgb.core_kwargs = {
             "sd_version": "sd21",
             "feature_key": ["us3", "us6", "us8"],
-            "freeze_backbone": True,
+            "freeze_backbone": bool(args.freeze_backbone),
             "use_text_condition": True,
             "map_out_dim": 512,
             "resize_shape": (256, 256),
             "normalize_mode": "zero_one",
+            "use_fp32": False,
+            "fpn_dim": 256,
+            "fpn_num_queries": 8,
+            "fpn_dropout": 0.1,
+            "layer_scale_init": 0.1,
         }
         if args.cleandift_checkpoint and str(args.cleandift_checkpoint).lower() not in ("none", "null", ""):
             config.observation.encoder.rgb.core_kwargs["custom_checkpoint"] = _expand_path(args.cleandift_checkpoint)
@@ -418,7 +326,7 @@ def build_config(args):
         config.observation.encoder.rgb.obs_randomizer_class = "ColorRandomizer"
         config.observation.encoder.rgb.obs_randomizer_kwargs = {}
 
-        config.algo.cleandift_alignment_weight = 0
+        config.algo.cleandift_alignment_weight = float(args.alignment_weight)
         config.algo.cleandift_alignment_freq = 1.0
         config.algo.cleandift_alignment_freq_min = 0.2
         config.algo.cleandift_alignment_freq_drop_ratio = 0.01
@@ -429,6 +337,7 @@ def build_config(args):
     elif use_resnet50:
         config.observation.encoder.rgb.core_class = "VisualCore"
         config.observation.encoder.rgb.core_kwargs.backbone_class = "ResNet50Conv"
+        config.observation.encoder.rgb.core_kwargs.normalize_mode = "imagenet"
         config.observation.encoder.rgb.core_kwargs.backbone_kwargs = {
             "pretrained": True,
             "use_cam": False,
@@ -483,8 +392,10 @@ def main():
     parser.add_argument("--visual_encoder", type=str, default="ResNet50Conv",
                         choices=["ResNet50Conv", "CleanDIFTConv"],
                         help="视觉编码器类型")
-    parser.add_argument("--freeze_backbone", action="store_true", default=False,
+    parser.add_argument("--freeze_backbone", action="store_true", default=True,
                         help="冻结backbone（仅CleanDIFT）")
+    parser.add_argument("--unfreeze_backbone", dest="freeze_backbone", action="store_false",
+                        help="不冻结backbone（仅CleanDIFT）")
     parser.add_argument("--alignment_weight", type=float, default=0.1,
                         help="对齐损失权重（仅CleanDIFT）")
     parser.add_argument("--cleandift_checkpoint", type=str, default=None,
@@ -493,6 +404,8 @@ def main():
                         help="仅使用RGB输入，禁用low_dim状态")
     parser.add_argument("--use_low_dim", action="store_true", default=False,
                         help="显式启用low_dim状态输入")
+    parser.add_argument("--language_prompt", type=str, default=None,
+                        help="覆盖数据集语言指令（默认None表示使用数据集/无语言）")
 
     parser.add_argument("--cameras", type=str, nargs="+", default=None,
                         help="相机列表（需要恰好2个）。")
@@ -559,7 +472,6 @@ def main():
 
     rank_log_dir = None
     if rank != 0:
-        os.environ["ROBOMIMIC_QUIET"] = "1"
         rank_log_dir = _expand_path(args.log_dir or ".")
         rank_log_dir = os.path.join(rank_log_dir, "rank_logs")
         try:
@@ -569,10 +481,6 @@ def main():
             log_path = f"/tmp/train_droid_auto_rank{rank}.log"
         sys.stdout = open(log_path, "w")
         sys.stderr = sys.stdout
-    else:
-        if not args.verbose:
-            os.environ["ROBOMIMIC_QUIET"] = "1"
-            _install_output_filter(drop_blank=not args.show_progress)
 
     if args.visual_encoder == "CleanDIFTConv":
         try:
@@ -618,33 +526,13 @@ def main():
             steps = int(math.ceil(dataset_len / float(global_batch)))
             with config.values_unlocked():
                 config.experiment.epoch_every_n_steps = steps
-            if rank == 0:
-                print(
-                    f"Auto steps_per_epoch: {steps} (dataset_len={dataset_len}, batch_size={args.batch_size}, world_size={world_size})",
-                    flush=True,
-                )
-        elif rank == 0:
-            print("Auto steps_per_epoch failed; please set --steps_per_epoch explicitly.", flush=True)
+        else:
+            pass
 
     if rank == 0 and args.use_ddp:
         rank_log_root = _expand_path(args.log_dir or ".")
         rank_log_root = os.path.join(rank_log_root, "rank_logs")
         os.makedirs(rank_log_root, exist_ok=True)
-        print(f"Per-rank logs: {rank_log_root}", flush=True)
-
-    if rank == 0:
-        print("=" * 80)
-        print("DROID自动训练脚本")
-        print("=" * 80)
-        print(f"  实验名称: {config.experiment.name}")
-        print(f"  数据集: {list(args.dataset_names)}")
-        print(f"  动作类型: {args.action_type}")
-        print(f"  Visual Encoder: {args.visual_encoder}")
-        print(f"  相机: {config.observation.modalities.obs.rgb}")
-        print(f"  批次大小: {args.batch_size}")
-        print(f"  Epoch数: {args.num_epochs}")
-        print(f"  DDP多GPU: {bool(args.use_ddp)}")
-        print("=" * 80)
 
     try:
         train(config, device=device)

@@ -103,6 +103,7 @@ def robomimic_transform(
     include_proprio: bool = True,
     view_dropout_prob: float = 0.0,
     camera_keys: Optional[Sequence[str]] = None,
+    language_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     if camera_keys is None:
         camera_keys = [
@@ -112,12 +113,12 @@ def robomimic_transform(
     if len(camera_keys) != 2:
         raise ValueError(f"robomimic_transform expects 2 camera keys, got {len(camera_keys)}")
 
-    img1 = tf.cast(trajectory["observation"]["image_primary"], tf.float32) / 255.0
-    img2 = tf.cast(trajectory["observation"]["image_secondary"], tf.float32) / 255.0
+    img1 = tf.cast(trajectory["observation"]["image_primary"], tf.float32)
+    img2 = tf.cast(trajectory["observation"]["image_secondary"], tf.float32)
 
     if normalize_to_neg_one_one:
-        img1 = img1 * 2.0 - 1.0
-        img2 = img2 * 2.0 - 1.0
+        img1 = img1 / 127.5 - 1.0
+        img2 = img2 / 127.5 - 1.0
 
     if view_dropout_prob and view_dropout_prob > 0.0:
         drop = tf.less(tf.random.uniform([], 0.0, 1.0), float(view_dropout_prob))
@@ -140,10 +141,26 @@ def robomimic_transform(
     img1 = tf.transpose(img1, perm=[0, 3, 1, 2])
     img2 = tf.transpose(img2, perm=[0, 3, 1, 2])
 
+    if language_prompt is not None and str(language_prompt).strip() != "":
+        try:
+            lang_shape = tf.shape(trajectory["task"]["language_instruction"])
+        except Exception:
+            try:
+                lang_shape = tf.shape(trajectory["observation"]["pad_mask"])
+            except Exception:
+                lang_shape = tf.shape(img1)[:1]
+        raw_language = tf.fill(lang_shape, tf.constant(str(language_prompt)))
+    else:
+        task = trajectory.get("task", {})
+        if isinstance(task, dict) and "language_instruction" in task:
+            raw_language = tf.fill(tf.shape(task["language_instruction"]), "Pick up the red object from the green tray and insert it into the yellow hole.")
+        else:
+            raw_language = tf.fill(tf.shape(img1)[:1], "Pick up the red object from the green tray and insert it into the yellow hole.")
+
     obs_dict = {
         camera_keys[0]: img1,
         camera_keys[1]: img2,
-        "raw_language": trajectory["task"]["language_instruction"],
+        "raw_language": raw_language,
         "pad_mask": trajectory["observation"]["pad_mask"][..., None],
     }
 

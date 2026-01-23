@@ -89,8 +89,10 @@ def train(config, device):
     _, rank, world_size = _get_rank_info()
     is_main_process = (rank == 0)
 
+    stage_log_enabled = os.environ.get("ROBOMIMIC_STAGE_LOG", "1") == "1"
+
     def _stage_log(message):
-        if is_main_process:
+        if is_main_process and stage_log_enabled:
             print(message, flush=True)
 
     # print("\n============= New Training Run with Config =============")
@@ -127,9 +129,19 @@ def train(config, device):
     ds_format = config.train.data_format
     use_neg_one_one_norm = False
     if hasattr(config.observation.encoder, "rgb") and hasattr(config.observation.encoder.rgb, "core_kwargs"):
-        backbone_class = config.observation.encoder.rgb.core_kwargs.get("backbone_class", "")
-        if "CleanDIFT" in backbone_class or "DIFT" in backbone_class:
+        core_class = getattr(config.observation.encoder.rgb, "core_class", "") or ""
+        core_kwargs = getattr(config.observation.encoder.rgb, "core_kwargs", {}) or {}
+        backbone_class = core_kwargs.get("backbone_class", "") or ""
+        normalize_mode = core_kwargs.get("normalize_mode")
+        if normalize_mode in ("neg_one_one", "-1_1", "minus_one_one"):
             use_neg_one_one_norm = True
+        elif normalize_mode in (None, "zero_one", "imagenet"):
+            use_neg_one_one_norm = False
+        else:
+            if "CleanDIFT" in core_class or "DIFT" in core_class:
+                use_neg_one_one_norm = True
+            if "CleanDIFT" in backbone_class or "DIFT" in backbone_class:
+                use_neg_one_one_norm = True
 
     if ds_format == "droid_rlds":
         # # load basic metadata from training file
@@ -244,6 +256,11 @@ def train(config, device):
         action_normalization_stats = action_stats_to_normalization_stats(action_stats, action_config)
         has_proprio = len(config.observation.modalities.obs.low_dim) > 0
         view_dropout_prob = getattr(config.train, "view_dropout_prob", 0.0)
+        language_prompt = None
+        try:
+            language_prompt = config.train.get("language_prompt", None)
+        except Exception:
+            language_prompt = getattr(config.train, "language_prompt", None)
         dataset = dataset.map(
             lambda traj: robomimic_transform(
                 traj,
@@ -251,6 +268,7 @@ def train(config, device):
                 include_proprio=has_proprio,
                 view_dropout_prob=view_dropout_prob,
                 camera_keys=obs_modalities,
+                language_prompt=language_prompt,
             ),
             num_parallel_calls=config.train.traj_transform_threads,
         )
@@ -314,39 +332,6 @@ def train(config, device):
         _stage_log("Warming up dataloader (first batch)...")
         data_loader_iter = iter(train_loader)
         rlds_batch = next(data_loader_iter)
-        if is_main_process:
-            preview_count = int(os.environ.get("ROBOMIMIC_PREVIEW_IMAGES", "4"))
-            if preview_count > 0:
-                preview_dir = os.path.join(os.getcwd(), "preview")
-                os.makedirs(preview_dir, exist_ok=True)
-                obs_dict = rlds_batch.get("obs", {})
-                if isinstance(obs_dict, dict):
-                    camera_keys = list(obs_modalities)
-                    available_keys = [k for k in camera_keys if k in obs_dict]
-                    if available_keys:
-                        sample_tensor = obs_dict[available_keys[0]]
-                        if hasattr(sample_tensor, "shape"):
-                            batch_size = int(sample_tensor.shape[0])
-                            num_samples = min(preview_count, batch_size)
-                            if num_samples > 0:
-                                indices = np.random.choice(batch_size, size=num_samples, replace=False)
-                                for cam_key in available_keys:
-                                    cam_tensor = obs_dict[cam_key]
-                                    for i, idx in enumerate(indices):
-                                        frame = cam_tensor[idx, 0]
-                                        if isinstance(frame, np.ndarray):
-                                            frame = torch.from_numpy(frame)
-                                        if torch.is_tensor(frame):
-                                            if frame.ndim == 3 and frame.shape[0] in (1, 3):
-                                                frame = frame.permute(1, 2, 0)
-                                            frame = frame.float()
-                                            if frame.min() < 0:
-                                                frame = (frame + 1.0) / 2.0
-                                            frame = frame.clamp(0, 1).mul(255).byte().cpu().numpy()
-                                        if not isinstance(frame, np.ndarray):
-                                            continue
-                                        filename = "{}_sample_{}.png".format(cam_key.replace("/", "_"), i)
-                                        imageio.imwrite(os.path.join(preview_dir, filename), frame)
         _stage_log("Dataloader ready, starting training...")
 
         shape_meta = FileUtils.get_shape_metadata_from_dataset(
@@ -488,7 +473,7 @@ def train(config, device):
 
     if not quiet:
         print("\n============= Model Summary =============")
-        print(model)  # print model summary
+        # model summary removed to reduce noisy stdout
         print("")
 
     ##### ------------------------------------------------------------------------------------ ######

@@ -297,6 +297,27 @@ class StableFeatureAligner(nn.Module):
 
         self._compile_enabled = os.environ.get("TORCHDYNAMO_DISABLE", "").lower() not in {"1", "true"}
 
+        def _configure_static_compile():
+            try:
+                import torch._dynamo as dynamo
+                if hasattr(dynamo.config, "dynamic_shapes"):
+                    dynamo.config.dynamic_shapes = False
+                if hasattr(dynamo.config, "assume_static_by_default"):
+                    dynamo.config.assume_static_by_default = True
+                if hasattr(dynamo.config, "specialize_int"):
+                    dynamo.config.specialize_int = True
+            except Exception:
+                pass
+
+        def _compile_module(module):
+            try:
+                module.compile(dynamic=False)
+            except TypeError:
+                module.compile()
+
+        self._configure_static_compile = _configure_static_compile
+        self._compile_module = _compile_module
+
         self.mapping = None
         if use_adapters:
             self.time_emb = FourierFeatures(1, mapping.width)
@@ -304,7 +325,8 @@ class StableFeatureAligner(nn.Module):
             self.mapping = MappingNetwork(mapping.depth, mapping.width, mapping.d_ff, dropout=mapping.dropout)
             if self._compile_enabled:
                 try:
-                    self.mapping.compile()
+                    self._configure_static_compile()
+                    self._compile_module(self.mapping)
                 except Exception:
                     warnings.warn("Failed to compile MappingNetwork, falling back to eager.")
 
@@ -350,7 +372,8 @@ class StableFeatureAligner(nn.Module):
         self.unet_feature_extractor_base.requires_grad_(False)
         if self._compile_enabled:
             try:
-                self.unet_feature_extractor_base.compile()
+                self._configure_static_compile()
+                self._compile_module(self.unet_feature_extractor_base)
             except Exception:
                 warnings.warn("Failed to compile base UNet, falling back to eager.")
 

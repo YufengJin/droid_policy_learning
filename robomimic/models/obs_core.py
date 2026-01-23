@@ -92,6 +92,7 @@ class VisualCore(EncoderCore, BaseNets.ConvBase):
         pool_kwargs=None,
         flatten=True,
         feature_dimension=64,
+        normalize_mode: Optional[str] = None,
     ):
         """
         Args:
@@ -109,6 +110,21 @@ class VisualCore(EncoderCore, BaseNets.ConvBase):
         """
         super(VisualCore, self).__init__(input_shape=input_shape)
         self.flatten = flatten
+        self.normalize_mode = normalize_mode
+
+        if self.normalize_mode not in {None, "imagenet"}:
+            raise ValueError(
+                f"Unsupported normalize_mode '{self.normalize_mode}'. Use None or 'imagenet'."
+            )
+
+        if self.normalize_mode == "imagenet":
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+            self.register_buffer("_norm_mean", mean)
+            self.register_buffer("_norm_std", std)
+        else:
+            self._norm_mean = None
+            self._norm_std = None
 
         if backbone_kwargs is None:
             backbone_kwargs = dict()
@@ -197,10 +213,14 @@ class VisualCore(EncoderCore, BaseNets.ConvBase):
         ndim = len(self.input_shape)
         assert tuple(inputs.shape)[-ndim:] == tuple(self.input_shape)
         
+        x = inputs
+        if self.normalize_mode == "imagenet" and self._norm_mean is not None:
+            x = (x - self._norm_mean) / self._norm_std
+
         # Check if backbone supports language conditioning
         if lang_cond is not None and hasattr(self.backbone, 'use_text_condition') and self.backbone.use_text_condition:
             # Manual forward pass with language conditioning
-            x = self.backbone(inputs, lang_cond=lang_cond)
+            x = self.backbone(x, lang_cond=lang_cond)
             
             # Apply remaining layers manually
             if self.pool is not None:
@@ -219,7 +239,7 @@ class VisualCore(EncoderCore, BaseNets.ConvBase):
             return x
         else:
             # Original behavior: use sequential forward
-            return self.nets(inputs)
+            return self.nets(x)
 
     def __repr__(self):
         """Pretty print network."""
@@ -248,6 +268,11 @@ class CleanDIFTRGBCore(EncoderCore):
         resize_shape: Optional[Tuple[int, int]] = (128, 128),
         normalize_mode: str = "zero_one",
         use_text_condition: bool = False,
+        use_fp32: Optional[bool] = None,
+        fpn_dim: int = 256,
+        fpn_num_queries: int = 4,
+        fpn_dropout: float = 0.1,
+        layer_scale_init: float = 0.1,
         custom_checkpoint: Optional[str] = None,
     ):
         super(CleanDIFTRGBCore, self).__init__(input_shape=input_shape)
@@ -300,7 +325,12 @@ class CleanDIFTRGBCore(EncoderCore):
             device=device,
             use_text_condition=use_text_condition,
             map_out_dim=map_out_dim,
+            use_fp32=use_fp32,
             custom_checkpoint=custom_checkpoint,
+            fpn_dim=fpn_dim,
+            fpn_num_queries=fpn_num_queries,
+            fpn_dropout=fpn_dropout,
+            layer_scale_init=layer_scale_init,
         )
 
         if map_out_dim is not None:
@@ -325,7 +355,7 @@ class CleanDIFTRGBCore(EncoderCore):
     def output_shape(self, input_shape):
         return [self._feature_dim]
 
-    def forward(self, inputs):
+    def forward(self, inputs, lang_cond=None):
         assert tuple(inputs.shape)[-3:] == tuple(self.input_shape)
         x = inputs
         target_h, target_w = self.resize_shape
@@ -334,7 +364,9 @@ class CleanDIFTRGBCore(EncoderCore):
         x = x.float()
         if self.normalize_mode == "zero_one" and self._norm_mean is not None:
             x = (x - self._norm_mean) / self._norm_std
-        features = self.encoder(x, lang_cond=None)
+        if not self.use_text_condition:
+            lang_cond = None
+        features = self.encoder(x, lang_cond=lang_cond)
         return features
 
 """
