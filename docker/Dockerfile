@@ -17,6 +17,8 @@
     RUN apt-get update && apt-get install -y \
         curl \
         wget \
+        tar \
+        procps \
         bzip2 \
         ca-certificates \
         git \
@@ -125,7 +127,8 @@
         "tensorflow_datasets==4.9.2" \
         "tensorflow_graphics==2021.12.3" \
         "dlimp @ git+https://github.com/kvablack/dlimp@5edaa4691567873d495633f2708982b42edf1972" \
-        plotly
+        plotly \
+        hydra-core>=1.1.0
     # Install egl_probe separately with --no-build-isolation to access installed cmake
     # Set CMAKE_POLICY_VERSION_MINIMUM to work around CMake compatibility issue
     # (egl_probe's CMakeLists.txt requires old CMake version, but system has newer CMake)

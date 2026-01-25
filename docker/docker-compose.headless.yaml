@@ -26,9 +26,10 @@ services:
       # 挂载 droid_policy_learning 项目代码
       - ..:/workspace/droid_policy_learning
       # 挂载 DROID 数据集
-      - ~/localdisk/droid/droid_100:/workspace/dataset/droid_100
+      - ~/localdisk/droid/droid_100:/workspace/dataset/droid_100:ro
+      - /home/yjin/repos/role-ros2/data/tfrecord/role_ros2:/workspace/dataset/role_ros2:ro
       # 挂载 Hugging Face cache 以避免重复下载模型
-      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+      # - ${HOME}/.cache/huggingface:/root/.cache/huggingface
     
     # 保持容器运行
     command: tail -f /dev/null
