@@ -74,6 +74,43 @@ def _get_rank_info():
     return False, 0, 1
 
 
+def _maybe_strip_cleandift_teacher(model, config, quiet=False):
+    strip_flag = bool(getattr(config.train, "strip_cleandift_teacher", False)) or bool(
+        getattr(config.algo, "strip_cleandift_teacher", False)
+    )
+    if not strip_flag:
+        return 0
+
+    stripped = 0
+    visited = set()
+    # Algo objects are not nn.Module; use underlying nets if available.
+    module_root = getattr(model, "nets", None)
+    if module_root is None and hasattr(model, "modules"):
+        module_root = model
+    if module_root is None or not hasattr(module_root, "modules"):
+        if not quiet:
+            print("⚠️  strip_cleandift_teacher requested but model has no .nets; skipping.")
+        return 0
+
+    for module in module_root.modules():
+        if not hasattr(module, "strip_teacher"):
+            continue
+        module_id = id(module)
+        if module_id in visited:
+            continue
+        visited.add(module_id)
+        try:
+            did_strip = module.strip_teacher(strip_text_encoder=False, verbose=not quiet)
+            if did_strip:
+                stripped += 1
+        except Exception as exc:
+            if not quiet:
+                print(f"⚠️  Failed to strip CleanDIFT teacher on {module.__class__.__name__}: {exc}")
+    if stripped > 0 and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return stripped
+
+
 def train(config, device):
     """
     Train a model using the algorithm.
@@ -470,6 +507,7 @@ def train(config, device):
         from robomimic.utils.file_utils import maybe_dict_from_checkpoint
         ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
         model.deserialize(ckpt_dict["model"])
+    _maybe_strip_cleandift_teacher(model, config, quiet=quiet)
 
     if not quiet:
         print("\n============= Model Summary =============")

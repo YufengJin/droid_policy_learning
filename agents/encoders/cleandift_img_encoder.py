@@ -732,6 +732,55 @@ class CleanDIFTImgEncoder(nn.Module):
             return self.s2fpn_fusion(features)
         else:
             return features[self.primary_feature_key]
+
+    def strip_teacher(self, strip_text_encoder: bool = False, verbose: bool = False) -> bool:
+        """
+        Drop alignment teacher/base UNet (and optionally text encoder) to save VRAM.
+        Safe for inference when alignment loss is not used.
+        """
+        model = getattr(self, "model", None)
+        if model is None:
+            return False
+
+        stripped = False
+        if hasattr(model, "unet_feature_extractor_base"):
+            try:
+                delattr(model, "unet_feature_extractor_base")
+            except Exception:
+                model.unet_feature_extractor_base = None
+            stripped = True
+
+        if strip_text_encoder:
+            # Disable text conditioning and remove text encoder to save memory.
+            self.use_text_condition = False
+            try:
+                model.use_text_condition = False
+            except Exception:
+                pass
+            if not hasattr(model, "_empty_prompt_embeds"):
+                try:
+                    with torch.no_grad():
+                        prompt_embeds_dict = model.get_prompt_embeds([""])
+                    model._empty_prompt_embeds = prompt_embeds_dict["prompt_embeds"]
+                except Exception:
+                    pass
+            if hasattr(model, "pipe") and hasattr(model.pipe, "text_encoder"):
+                try:
+                    del model.pipe.text_encoder
+                except Exception:
+                    try:
+                        model.pipe.text_encoder = None
+                    except Exception:
+                        pass
+            stripped = True
+
+        if verbose and stripped:
+            msg = "[CleanDIFT] Stripped teacher/base UNet"
+            if strip_text_encoder:
+                msg += " and text encoder"
+            print(msg)
+
+        return stripped
     
     def get_parameter_groups(
         self,

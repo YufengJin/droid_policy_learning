@@ -416,14 +416,24 @@ class StableFeatureAligner(nn.Module):
         self.timestep = nn.Parameter(
             torch.tensor(float(t_init), requires_grad=learn_timestep), requires_grad=learn_timestep
         )
+        # Cache for fixed prompt embeddings to avoid repeated text encoding.
+        self._prompt_cache_key = None
+        self._prompt_cache_embeds = None
 
     def get_prompt_embeds(self, prompt: list[str]) -> dict[str, torch.Tensor | None]:
+        key = tuple(prompt)
+        if self._prompt_cache_key == key and self._prompt_cache_embeds is not None:
+            self.prompt_embeds = self._prompt_cache_embeds
+            return {"prompt_embeds": self.prompt_embeds}
+
         self.prompt_embeds, _ = self.pipe.encode_prompt(
             prompt=prompt,
             device=torch.device(self.device),
             num_images_per_prompt=1,
             do_classifier_free_guidance=False,
         )
+        self._prompt_cache_key = key
+        self._prompt_cache_embeds = self.prompt_embeds
         return {"prompt_embeds": self.prompt_embeds}
 
     def _get_unet_conds(self, prompts: list[str], device, dtype, N_T) -> dict[str, torch.Tensor]:

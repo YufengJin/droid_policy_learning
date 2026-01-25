@@ -276,10 +276,8 @@ def load_dict_from_checkpoint(ckpt_path):
         ckpt_dict (dict): Loaded checkpoint dictionary.
     """
     ckpt_path = os.path.expanduser(ckpt_path)
-    if not torch.cuda.is_available():
-        ckpt_dict = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
-    else:
-        ckpt_dict = torch.load(ckpt_path)
+    # Always load checkpoints on CPU to avoid GPU OOM when resuming in DDP.
+    ckpt_dict = torch.load(ckpt_path, map_location="cpu")
     return ckpt_dict
 
 

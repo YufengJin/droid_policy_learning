@@ -279,6 +279,12 @@ def build_config(args):
             config.train.language_prompt = args.language_prompt
     if args.checkpoint_dir:
         config.train.checkpoint_dir = _expand_path(args.checkpoint_dir)
+    if args.disable_ema:
+        with config.unlocked():
+            config.algo.ema.enabled = False
+    if args.strip_teacher:
+        with config.unlocked():
+            config.train.strip_cleandift_teacher = True
 
     config.observation.image_dim = [256, 256]
 
@@ -400,6 +406,10 @@ def main():
                         help="对齐损失权重（仅CleanDIFT）")
     parser.add_argument("--cleandift_checkpoint", type=str, default=None,
                         help="CleanDIFT自定义checkpoint目录")
+    parser.add_argument("--disable_ema", action="store_true", default=False,
+                        help="关闭EMA以节省显存")
+    parser.add_argument("--strip_teacher", action="store_true", default=False,
+                        help="移除CleanDIFT teacher/base UNet以节省显存（推理/冻结backbone时安全）")
     parser.add_argument("--rgb_only", action="store_true", default=False,
                         help="仅使用RGB输入，禁用low_dim状态")
     parser.add_argument("--use_low_dim", action="store_true", default=False,

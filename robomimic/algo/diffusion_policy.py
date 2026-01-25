@@ -403,18 +403,36 @@ class DiffusionPolicyUNet(PolicyAlgo):
                 nets = self._get_nets()
                 device = next(nets["policy"].parameters()).device
 
-                lang_model = get_lang_model(device)
+                encoded_lang = None
+                cache_allowed = lang_dropout_prob == 0.0
+                if cache_allowed:
+                    try:
+                        unique_prompts = set(lang_prompts)
+                    except Exception:
+                        unique_prompts = None
+                    if unique_prompts is not None and len(unique_prompts) == 1:
+                        cache_key = (next(iter(unique_prompts)), len(lang_prompts), To, str(device))
+                        if not hasattr(self, "_lang_cache"):
+                            self._lang_cache = {}
+                        cached = self._lang_cache.get(cache_key)
+                        if cached is not None:
+                            encoded_lang = cached
 
-                tokenizer = get_tokenizer()
-                encoded_input = tokenizer(
-                    lang_prompts,
-                    padding=True,
-                    truncation=True,
-                    max_length=tokenizer.model_max_length,
-                    return_tensors='pt'
-                ).to(device)
-                outputs = lang_model(**encoded_input)
-                encoded_lang = outputs.last_hidden_state.sum(1).unsqueeze(1).repeat(1, To, 1)
+                if encoded_lang is None:
+                    lang_model = get_lang_model(device)
+                    tokenizer = get_tokenizer()
+                    encoded_input = tokenizer(
+                        lang_prompts,
+                        padding=True,
+                        truncation=True,
+                        max_length=tokenizer.model_max_length,
+                        return_tensors='pt'
+                    ).to(device)
+                    outputs = lang_model(**encoded_input)
+                    encoded_lang = outputs.last_hidden_state.sum(1).unsqueeze(1).repeat(1, To, 1)
+                    if cache_allowed and unique_prompts is not None and len(unique_prompts) == 1:
+                        self._lang_cache[cache_key] = encoded_lang
+
                 if lang_keep_mask is not None:
                     keep = lang_keep_mask.to(device=device, dtype=encoded_lang.dtype).view(-1, 1, 1)
                     encoded_lang = encoded_lang * keep
