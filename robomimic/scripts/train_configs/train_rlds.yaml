@@ -1,0 +1,190 @@
+# Hydra config for RLDS training (droid_rlds data_format).
+# Override from CLI: train_rlds.py train.data_path=/path dataset_names=[role_ros2]
+# Or load a generated JSON: train_rlds.py load_from=/path/to/generated.json
+
+load_from: null  # optional: path to JSON from config_gen (droid_runs_language_conditioned_rlds)
+debug: false
+
+algo_name: diffusion_policy
+
+experiment:
+  name: train_rlds
+  validate: false
+  logging:
+    terminal_output_to_txt: true
+    log_tb: true
+    log_wandb: false
+    wandb_proj_name: diffusion_policy_01-25-None_droid_im
+  mse:
+    enabled: true
+    every_n_epochs: 10
+    on_save_ckpt: true
+    num_samples: 6
+    visualize: true
+  save:
+    enabled: true
+    every_n_seconds: null
+    every_n_epochs: 50
+    epochs: []
+    on_best_validation: false
+    on_best_rollout_return: false
+    on_best_rollout_success_rate: true
+  epoch_every_n_steps: 100
+  validation_epoch_every_n_steps: 10
+  env: null
+  additional_envs: null
+  ckpt_path: null
+  env_meta_update_dict: {}
+  render: false
+  render_video: true
+  keep_all_videos: false
+  video_skip: 5
+  rollout:
+    enabled: false
+    n: 50
+    horizon: 400
+    rate: 50
+    warmstart: 0
+    terminate_on_success: true
+
+train:
+  data: null
+  data_format: droid_rlds
+  data_path: /workspace/dataset
+  dataset_names: [droid_100]
+  sample_weights: [1]
+  output_dir: /workspace/droid_policy_learning/logs/droid/im/diffusion_policy
+  num_data_workers: 0
+  hdf5_cache_mode: low_dim
+  hdf5_use_swmr: true
+  hdf5_load_next_obs: false
+  hdf5_normalize_obs: false
+  hdf5_filter_key: null
+  seq_length: 15
+  pad_seq_length: true
+  frame_stack: 2
+  pad_frame_stack: true
+  dataset_keys: []
+  goal_mode: null
+  truncated_geom_factor: 0.3
+  subsample_length: 100
+  num_parallel_calls: 200
+  traj_transform_threads: 48
+  traj_read_threads: 48
+  shuffle_buffer_size: 50000
+  cuda: true
+  batch_size: 128
+  num_epochs: 100000
+  seed: 1
+  action_keys:
+    - action/abs_pos
+    - action/abs_rot_6d
+    - action/gripper_position
+  action_shapes:
+    - [1, 3]
+    - [1, 6]
+    - [1, 1]
+  action_config:
+    action/cartesian_position: {normalization: min_max}
+    action/abs_pos: {normalization: min_max}
+    action/abs_rot_6d: {normalization: min_max, format: rot_6d, convert_at_runtime: rot_euler}
+    action/abs_rot_euler: {normalization: min_max, format: rot_euler}
+    action/gripper_position: {normalization: min_max}
+    action/cartesian_velocity: {normalization: null}
+    action/rel_pos: {normalization: null}
+    action/rel_rot_6d: {format: rot_6d, normalization: null, convert_at_runtime: rot_euler}
+    action/rel_rot_euler: {format: rot_euler, normalization: null}
+    action/gripper_velocity: {normalization: null}
+  shuffled_obs_key_groups: []
+
+algo:
+  optim_params:
+    policy:
+      learning_rate:
+        initial: 0.0001
+        decay_factor: 0.1
+        epoch_schedule: []
+      regularization: {L2: 0.0}
+  horizon:
+    observation_horizon: 2
+    action_horizon: 8
+    prediction_horizon: 16
+  unet:
+    enabled: true
+    diffusion_step_embed_dim: 256
+    down_dims: [256, 512, 1024]
+    kernel_size: 5
+    n_groups: 8
+  ema:
+    enabled: true
+    power: 0.75
+  ddpm:
+    enabled: false
+    num_train_timesteps: 100
+    num_inference_timesteps: 100
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    prediction_type: epsilon
+  ddim:
+    enabled: true
+    num_train_timesteps: 100
+    num_inference_timesteps: 10
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    set_alpha_to_one: true
+    steps_offset: 0
+    prediction_type: epsilon
+  noise_samples: 8
+
+observation:
+  image_dim: [128, 128]
+  modalities:
+    obs:
+      low_dim:
+        - robot_state/cartesian_position
+        - robot_state/gripper_position
+      rgb:
+        - camera/image/varied_camera_1_left_image
+        - camera/image/varied_camera_2_left_image
+      depth: []
+      scan: []
+    goal:
+      low_dim: []
+      rgb: []
+      depth: []
+      scan: []
+  encoder:
+    low_dim:
+      core_class: null
+      core_kwargs: {}
+      obs_randomizer_class: null
+      obs_randomizer_kwargs: {}
+    rgb:
+      core_class: VisualCore
+      fuser: null
+      core_kwargs:
+        feature_dimension: 512
+        flatten: true
+        backbone_class: ResNet50Conv
+        backbone_kwargs:
+          pretrained: true
+          use_cam: false
+          downsample: false
+        pool_class: null
+        pool_kwargs: null
+      obs_randomizer_class:
+        - ColorRandomizer
+        - CropRandomizer
+      obs_randomizer_kwargs:
+        - {}
+        - {crop_height: 116, crop_width: 116, num_crops: 1, pos_enc: false}
+    depth:
+      core_class: VisualCore
+      core_kwargs: {}
+      obs_randomizer_class: null
+      obs_randomizer_kwargs: {}
+    scan:
+      core_class: ScanCore
+      core_kwargs: {}
+      obs_randomizer_class: null
+      obs_randomizer_kwargs: {}

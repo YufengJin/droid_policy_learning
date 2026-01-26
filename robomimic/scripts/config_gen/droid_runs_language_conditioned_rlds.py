@@ -17,8 +17,10 @@ EXP_NAMES = OrderedDict(
         # Note: you can add co-training dataset here appending
         # a new dataset to "datasets" and adjusting "sample_weights"
         # accordingly
-        ("droid", {"datasets": ["droid"],
-                   "sample_weights": [1]})                                    
+        ("droid", {"datasets": ["droid_100"],
+                   "sample_weights": [1]}),
+        # ("role_ros2", {"datasets": ["role_ros2"],
+        #            "sample_weights": [1]}),                                  
     ])
 
 #############################################################################
