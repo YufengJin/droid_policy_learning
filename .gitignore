@@ -178,3 +178,6 @@ Thumbs.db
 
 # Apptainer
 *.sif
+
+# Outputs
+outputs/

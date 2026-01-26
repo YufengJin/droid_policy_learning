@@ -1,188 +1,358 @@
-# Hydra config for RLDS training (droid_rlds data_format).
-# Override from CLI: train_rlds.py train.data_path=/path dataset_names=[role_ros2]
-# Or load a generated JSON: train_rlds.py load_from=/path/to/generated.json
+# ============================================================================
+# Hydra 配置文件：RLDS 数据格式训练配置 (droid_rlds data_format)
+# ============================================================================
+# 使用方法：
+#   1. 使用默认配置: python -m robomimic.scripts.train_rlds
+#   2. 从命令行覆盖: python -m robomimic.scripts.train_rlds train.data_path=/path dataset_names=[role_ros2]
+#   3. 加载生成的 JSON: python -m robomimic.scripts.train_rlds load_from=/path/to/generated.json
+#   4. Debug 模式: python -m robomimic.scripts.train_rlds debug=true
+# ============================================================================
 
-load_from: null  # optional: path to JSON from config_gen (droid_runs_language_conditioned_rlds)
-debug: false
+# ----------------------------------------------------------------------------
+# Hydra 特定配置项（在 train_rlds.py 中使用，不会传递给 robomimic config）
+# ----------------------------------------------------------------------------
+load_from: null  # 可选：从 config_gen (droid_runs_language_conditioned_rlds) 生成的 JSON 文件路径
+                 # 如果提供，将完全替换此 YAML 配置
+                 # 使用: train_rlds.py load_from=/path/to/generated.json
 
-algo_name: diffusion_policy
+debug: false     # Debug 模式开关
+                 # 如果为 true，train_rlds.py 会修改配置为快速测试模式：
+                 #   - epoch_every_n_steps = 3
+                 #   - validation_epoch_every_n_steps = 3
+                 #   - num_epochs = 200
+                 #   - rollout.rate = 1, rollout.n = 2, rollout.horizon = 10
+                 #   - output_dir = "/tmp/tmp_trained_models"
 
+# ----------------------------------------------------------------------------
+# 算法配置
+# ----------------------------------------------------------------------------
+algo_name: diffusion_policy  # 使用的算法名称，用于创建对应的配置对象
+                              # 支持: bc, bc_rnn, bc_transformer, diffusion_policy, iql, cql, td3_bc, bcq, hbc, iris
+
+# ----------------------------------------------------------------------------
+# 实验配置 (experiment)
+# ----------------------------------------------------------------------------
 experiment:
+  # 实验名称，用于创建输出目录
+  # 输出路径: {output_dir}/{name}/{timestamp}/
   name: train_rlds
+
+  # 是否启用验证集评估
+  # 注意: RLDS 格式 (droid_rlds) 目前不支持验证集分割
   validate: false
+
+  # 日志配置
   logging:
-    terminal_output_to_txt: true
-    log_tb: true
-    log_wandb: false
-    wandb_proj_name: diffusion_policy_01-25-None_droid_im
+    terminal_output_to_txt: true  # 是否将终端输出保存到 log.txt 文件
+                                  # 在 train.py:73 中，会将 stdout/stderr 重定向到日志文件
+    log_tb: true                  # 是否启用 TensorBoard 日志
+                                  # 日志保存在 {log_dir}/events.out.tfevents.*
+    log_wandb: false               # 是否启用 Weights & Biases 日志
+    wandb_proj_name: diffusion_policy_droid  # WandB 项目名称
+
+  # MSE (均方误差) 评估配置
+  # 用于计算模型在数据集上的预测误差
   mse:
-    enabled: true
-    every_n_epochs: 10
-    on_save_ckpt: true
-    num_samples: 6
-    visualize: true
+    enabled: true           # 是否启用 MSE 评估
+    every_n_epochs: 10      # 每 N 个 epoch 计算一次 MSE
+    on_save_ckpt: true      # 保存检查点时是否计算 MSE
+    num_samples: 6          # 用于 MSE 计算的样本数量
+    visualize: true         # 是否生成可视化结果
+    # 注意: RLDS 格式 (droid_rlds) 目前不支持 MSE 评估 (train.py:446)
+
+  # 模型保存配置
   save:
-    enabled: true
-    every_n_seconds: null
-    every_n_epochs: 50
-    epochs: []
-    on_best_validation: false
-    on_best_rollout_return: false
-    on_best_rollout_success_rate: true
-  epoch_every_n_steps: 100
-  validation_epoch_every_n_steps: 10
-  env: null
-  additional_envs: null
-  ckpt_path: null
-  env_meta_update_dict: {}
-  render: false
-  render_video: true
-  keep_all_videos: false
-  video_skip: 5
+    enabled: true           # 是否启用模型保存
+    every_n_seconds: null  # 每 N 秒保存一次 (null 表示禁用)
+                           # 在 train.py:346-347 中检查
+    every_n_epochs: 50      # 每 N 个 epoch 保存一次
+                           # 在 train.py:348-349 中检查: epoch % every_n_epochs == 0
+    epochs: []             # 指定要保存的 epoch 列表
+                           # 在 train.py:350 中检查: epoch in epochs
+    on_best_validation: false           # 达到最佳验证损失时是否保存
+                                        # 在 train.py:382 中检查
+    on_best_rollout_return: false       # 达到最佳 rollout 回报时是否保存
+                                        # 在 train.py:434 中检查
+    on_best_rollout_success_rate: true  # 达到最佳 rollout 成功率时是否保存
+                                        # 在 train.py:435 中检查
+
+  # 训练周期配置
+  epoch_every_n_steps: 100              # 每个训练周期包含的步数（梯度更新次数）
+                                        # 在 train.py:325 中使用: train_num_steps = epoch_every_n_steps
+                                        # 如果为 None，则使用完整数据集遍历
+  validation_epoch_every_n_steps: 10    # 每个验证周期包含的步数
+                                        # 在 train.py:326 中使用: valid_num_steps = validation_epoch_every_n_steps
+
+  # 环境配置
+  env: null                 # 覆盖环境名称（如果提供）
+                            # 在 train.py:234-235 中使用: env_meta["env_name"] = config.experiment.env
+  additional_envs: null     # 额外的评估环境列表（用于 rollout）
+                            # 在 train.py:244-246 中使用，添加到 env_names 列表
+  ckpt_path: null          # 检查点路径（用于从检查点恢复训练）
+                           # 在 train.py:282-287 中加载模型权重
+  env_meta_update_dict: {} # 环境元数据更新字典
+                           # 在 train.py:192 中使用 deep_update(env_meta, ...) 更新环境元数据
+
+  # 渲染和视频配置
+  render: false            # 是否启用屏幕渲染（用于 rollout）
+  render_video: true       # 是否记录 rollout 视频
+                           # 在 train.py:253 和 409 中使用
+  keep_all_videos: false  # 是否保留所有视频（不仅仅是检查点时的视频）
+                          # 在 train.py:501 中使用
+  video_skip: 5           # 视频帧采样间隔（每 N 帧保存一帧）
+                          # 在 train.py:411 中使用
+
+  # Rollout 配置（在真实环境中评估策略）
+  # 在 train.py:240-258 中创建环境，392-413 中执行 rollout
   rollout:
-    enabled: false
-    n: 50
-    horizon: 400
-    rate: 50
-    warmstart: 0
-    terminate_on_success: true
+    enabled: false         # 是否启用 rollout 评估
+                          # 如果为 false，不会创建环境实例，节省资源
+    n: 50                 # 每个环境运行的 episode 数量
+                          # 在 train.py:401 中使用: num_episodes = rollout.n
+    horizon: 400          # 每个 episode 的最大步数
+                          # 在 train.py:405 中使用
+    rate: 50              # 每 N 个 epoch 运行一次 rollout
+                          # 在 train.py:391 中检查: epoch % rollout.rate == 0
+    warmstart: 0          # 预热期，前 N 个 epoch 不运行 rollout
+                          # 在 train.py:392 中检查: epoch > rollout.warmstart
+    terminate_on_success: true  # 任务成功时是否提前终止 episode
+                                # 在 train.py:412 中使用
 
+# ----------------------------------------------------------------------------
+# 训练配置 (train)
+# ----------------------------------------------------------------------------
 train:
-  data: null
-  data_format: droid_rlds
-  data_path: /workspace/dataset
-  dataset_names: [droid_100]
-  sample_weights: [1]
-  output_dir: /workspace/droid_policy_learning/logs/droid/im/diffusion_policy
-  num_data_workers: 0
-  hdf5_cache_mode: low_dim
-  hdf5_use_swmr: true
-  hdf5_load_next_obs: false
-  hdf5_normalize_obs: false
-  hdf5_filter_key: null
-  seq_length: 15
-  pad_seq_length: true
-  frame_stack: 2
-  pad_frame_stack: true
-  dataset_keys: []
-  goal_mode: null
-  truncated_geom_factor: 0.3
-  subsample_length: 100
-  num_parallel_calls: 200
-  traj_transform_threads: 48
-  traj_read_threads: 48
-  shuffle_buffer_size: 50000
-  cuda: true
-  batch_size: 128
-  num_epochs: 100000
-  seed: 1
-  action_keys:
-    - action/abs_pos
-    - action/abs_rot_6d
-    - action/gripper_position
-  action_shapes:
-    - [1, 3]
-    - [1, 6]
-    - [1, 1]
-  action_config:
-    action/cartesian_position: {normalization: min_max}
-    action/abs_pos: {normalization: min_max}
-    action/abs_rot_6d: {normalization: min_max, format: rot_6d, convert_at_runtime: rot_euler}
-    action/abs_rot_euler: {normalization: min_max, format: rot_euler}
-    action/gripper_position: {normalization: min_max}
-    action/cartesian_velocity: {normalization: null}
-    action/rel_pos: {normalization: null}
-    action/rel_rot_6d: {format: rot_6d, normalization: null, convert_at_runtime: rot_euler}
-    action/rel_rot_euler: {format: rot_euler, normalization: null}
-    action/gripper_velocity: {normalization: null}
-  shuffled_obs_key_groups: []
+  # 数据集配置（仅用于非 RLDS 格式）
+  data: null              # HDF5 数据集路径（用于 robomimic 格式）
+  data_format: droid_rlds # 数据格式: "robomimic", "droid", "droid_rlds"
+                          # 在 train.py:80 中使用，决定数据加载方式
 
+  # RLDS 数据集配置
+  data_path: /workspace/dataset  # RLDS 数据集根目录
+                                 # 在 train.py:99 中使用: BASE_DATASET_KWARGS["data_dir"]
+  dataset_names: [droid_100]     # 要使用的数据集名称列表
+                                 # 在 train.py:110 中使用，支持多个数据集联合训练
+                                 # 例如: [droid_100, role_ros2]
+  sample_weights: [1]            # 每个数据集的采样权重
+                                 # 在 train.py:125 中使用，用于 make_interleaved_dataset
+                                 # 权重越大，该数据集在训练中的贡献越大
+
+  # 输出配置
+  output_dir: /workspace/droid_policy_learning/outputs
+
+  # 序列配置（主要用于非 RLDS 格式）
+  seq_length: 15          # 序列长度（用于序列数据集）
+  pad_seq_length: true   # 是否填充序列长度
+  frame_stack: 2         # 帧堆叠数量
+  pad_frame_stack: true  # 是否填充帧堆叠
+
+  # RLDS 数据变换配置
+  dataset_keys: []        # 数据集键列表（未使用）
+  goal_mode: null         # 目标模式（用于目标条件策略）
+  truncated_geom_factor: 0.3  # 截断几何分布因子（未在 RLDS 中使用）
+
+  # RLDS 数据加载和变换参数
+  subsample_length: 100  # 轨迹子采样长度
+                          # 在 train.py:136 中使用，传递给 traj_transform_kwargs
+                          # 如果轨迹长度超过此值，会被子采样到此长度
+  num_parallel_calls: 200      # 帧变换的并行调用数
+                                # 在 train.py:146 中使用，传递给 frame_transform_kwargs
+  traj_transform_threads: 48   # 轨迹变换的线程数
+                                # 在 train.py:148 中使用，分配给 make_interleaved_dataset
+                                # 根据 sample_weights 分配到各个数据集
+  traj_read_threads: 48        # 轨迹读取的线程数
+                                # 在 train.py:149 中使用，分配给 make_interleaved_dataset
+  shuffle_buffer_size: 50000   # 数据打乱缓冲区大小（帧数）
+                                # 在 train.py:127 中使用，传递给 make_interleaved_dataset
+
+  # 训练超参数
+  cuda: true              # 是否使用 CUDA (GPU)
+                          # 在 train.py:70 和 547 中使用 TorchUtils.get_torch_device()
+  batch_size: 128        # 批次大小
+                          # 在 train.py:161 和 228 中使用
+  num_epochs: 100000      # 训练的总 epoch 数
+                          # 在 train.py:329 中使用: for epoch in range(1, num_epochs + 1)
+  seed: 1                 # 随机种子
+                          # 在 train.py:60-61 中使用: np.random.seed(), torch.manual_seed()
+
+  # 动作配置
+  action_keys:            # 动作键列表，定义动作的组成部分
+    - action/abs_pos      # 绝对位置 (3D: x, y, z)
+    - action/abs_rot_6d   # 绝对旋转 (6D 表示)
+    - action/gripper_position  # 夹爪位置 (1D)
+                          # 在 train.py:154, 172, 198 中使用
+                          # 用于从合并的动作统计信息中分离各个组件
+
+  action_shapes:          # 每个动作组件的形状
+    - [1, 3]              # action/abs_pos: (batch, 3)
+    - [1, 6]              # action/abs_rot_6d: (batch, 6)
+    - [1, 1]              # action/gripper_position: (batch, 1)
+                          # 在 train.py:94 中使用计算总动作维度: ac_dim = sum([ac_comp[1] for ac_comp in action_shapes])
+                          # 在 train.py:154 中使用 ActionUtils.get_action_stats_dict()
+
+  # 动作归一化配置
+  # 在 train.py:95 和 155 中使用 action_stats_to_normalization_stats()
+  action_config:
+    action/cartesian_position: {normalization: min_max}  # 笛卡尔位置归一化
+    action/abs_pos: {normalization: min_max}             # 绝对位置归一化到 [-1, 1]
+    action/abs_rot_6d:                                    # 绝对旋转 6D 表示
+      normalization: min_max                              # 使用 min-max 归一化
+      format: rot_6d                                      # 格式为 6D 旋转
+      convert_at_runtime: rot_euler                       # 运行时转换为欧拉角
+    action/abs_rot_euler: {normalization: min_max, format: rot_euler}  # 绝对旋转欧拉角
+    action/gripper_position: {normalization: min_max}      # 夹爪位置归一化
+    action/cartesian_velocity: {normalization: null}      # 笛卡尔速度（不归一化）
+    action/rel_pos: {normalization: null}                 # 相对位置（不归一化）
+    action/rel_rot_6d:                                    # 相对旋转 6D
+      format: rot_6d
+      normalization: null
+      convert_at_runtime: rot_euler
+    action/rel_rot_euler: {format: rot_euler, normalization: null}  # 相对旋转欧拉角
+    action/gripper_velocity: {normalization: null}        # 夹爪速度（不归一化）
+
+  shuffled_obs_key_groups: []  # 观察键打乱组（用于数据增强）
+
+# ----------------------------------------------------------------------------
+# 算法特定配置 (algo)
+# ----------------------------------------------------------------------------
 algo:
+  # 优化器配置
   optim_params:
     policy:
       learning_rate:
-        initial: 0.0001
-        decay_factor: 0.1
-        epoch_schedule: []
-      regularization: {L2: 0.0}
-  horizon:
-    observation_horizon: 2
-    action_horizon: 8
-    prediction_horizon: 16
-  unet:
-    enabled: true
-    diffusion_step_embed_dim: 256
-    down_dims: [256, 512, 1024]
-    kernel_size: 5
-    n_groups: 8
-  ema:
-    enabled: true
-    power: 0.75
-  ddpm:
-    enabled: false
-    num_train_timesteps: 100
-    num_inference_timesteps: 100
-    beta_schedule: squaredcos_cap_v2
-    clip_sample: true
-    prediction_type: epsilon
-  ddim:
-    enabled: true
-    num_train_timesteps: 100
-    num_inference_timesteps: 10
-    beta_schedule: squaredcos_cap_v2
-    clip_sample: true
-    set_alpha_to_one: true
-    steps_offset: 0
-    prediction_type: epsilon
-  noise_samples: 8
+        initial: 0.0001        # 初始学习率
+        decay_factor: 0.1      # 学习率衰减因子
+        epoch_schedule: []     # 学习率衰减的 epoch 列表（空列表表示不衰减）
+                               # 用于 MultiStepLR 调度器
+      regularization: {L2: 0.0}  # L2 正则化系数（权重衰减）
 
+  # Diffusion Policy 时间窗口配置
+  # 在 train.py:134-135 中使用，传递给 make_interleaved_dataset 的 traj_transform_kwargs
+  horizon:
+    observation_horizon: 2     # 观察窗口大小（历史观察帧数）
+                               # 在 train.py:134 中使用: window_size = observation_horizon
+                               # 在 diffusion_policy.py:151 中使用: To = observation_horizon
+    action_horizon: 8          # 动作窗口大小（一次预测的动作帧数）
+                               # 在 diffusion_policy.py:152 中使用: Ta = action_horizon
+    prediction_horizon: 16     # 预测窗口大小（模型预测的未来动作帧数）
+                               # 在 train.py:135 中使用: future_action_window_size = prediction_horizon - 1
+                               # 在 diffusion_policy.py:153 中使用: Tp = prediction_horizon
+
+  # U-Net 网络配置（Diffusion Policy 的核心网络）
+  unet:
+    enabled: true              # 是否启用 U-Net
+    diffusion_step_embed_dim: 256  # Diffusion 时间步嵌入维度
+    down_dims: [256, 512, 1024]     # U-Net 下采样层的维度
+    kernel_size: 5                  # 卷积核大小
+    n_groups: 8                     # 组归一化的组数
+
+  # EMA (指数移动平均) 配置
+  ema:
+    enabled: true   # 是否启用 EMA
+                    # 在 diffusion_policy.py:127 中创建 EMAModel
+    power: 0.75     # EMA 衰减率
+                    # 在 diffusion_policy.py:128 中使用
+
+  # DDPM (Denoising Diffusion Probabilistic Model) 配置
+  ddpm:
+    enabled: false              # 是否使用 DDPM 调度器
+                                # 如果为 false，使用 DDIM 调度器
+    num_train_timesteps: 100    # 训练时的扩散步数
+                                # 在 diffusion_policy.py:108 中使用
+    num_inference_timesteps: 100 # 推理时的扩散步数
+    beta_schedule: squaredcos_cap_v2  # Beta 调度类型
+    clip_sample: true           # 是否裁剪采样值
+    prediction_type: epsilon    # 预测类型: "epsilon" (噪声) 或 "v_prediction" (速度)
+
+  # DDIM (Denoising Diffusion Implicit Model) 配置
+  # DDIM 是 DDPM 的加速版本，使用更少的推理步数
+  ddim:
+    enabled: true               # 是否使用 DDIM 调度器（推荐，更快）
+                                # 在 diffusion_policy.py:113 中检查
+    num_train_timesteps: 100    # 训练时的扩散步数
+                                # 在 diffusion_policy.py:115 中使用
+    num_inference_timesteps: 10 # 推理时的扩散步数（通常远小于训练步数）
+                                # 在 diffusion_policy.py:115 中使用
+                                # 更少的步数 = 更快的推理，但可能降低质量
+    beta_schedule: squaredcos_cap_v2  # Beta 调度类型
+    clip_sample: true           # 是否裁剪采样值
+    set_alpha_to_one: true      # 是否将 alpha 设置为 1
+    steps_offset: 0             # 步数偏移
+    prediction_type: epsilon    # 预测类型
+
+  noise_samples: 8  # 噪声采样数量（用于训练时的噪声增强）
+                    # 在 diffusion_policy.py 中使用
+
+# ----------------------------------------------------------------------------
+# 观察配置 (observation)
+# ----------------------------------------------------------------------------
 observation:
-  image_dim: [128, 128]
+  # 图像尺寸配置
+  image_dim: [128, 128]  # 图像 resize 后的尺寸 [height, width]
+                         # 在 train.py:143-144 中使用，传递给 frame_transform_kwargs
+                         # 应用于 primary 和 secondary 相机图像
+
+  # 观察模态定义
+  # 在 train.py:91 和 101 中使用，映射到 RLDS 数据集的键
   modalities:
-    obs:
-      low_dim:
-        - robot_state/cartesian_position
-        - robot_state/gripper_position
-      rgb:
-        - camera/image/varied_camera_1_left_image
-        - camera/image/varied_camera_2_left_image
-      depth: []
-      scan: []
-    goal:
+    obs:  # 当前观察
+      low_dim:  # 低维状态观察（本体感觉）
+        - robot_state/cartesian_position  # 笛卡尔位置 (6D: x, y, z, rx, ry, rz)
+        - robot_state/gripper_position     # 夹爪位置 (1D)
+                                          # 在 train.py:101 中映射到 RLDS 键
+      rgb:  # RGB 图像观察
+        - camera/image/varied_camera_1_left_image  # 主相机图像
+        - camera/image/varied_camera_2_left_image  # 次相机图像
+                                                  # 在 train.py:91 和 100 中使用
+                                                  # 注意: 目前必须为 2 个相机 (train.py:93)
+      depth: []  # 深度图像观察（未使用）
+      scan: []   # 激光扫描观察（未使用）
+    goal:  # 目标观察（用于目标条件策略）
       low_dim: []
       rgb: []
       depth: []
       scan: []
+
+  # 观察编码器配置
+  # 定义如何编码不同类型的观察
   encoder:
+    # 低维观察编码器（通常不需要编码器，直接使用）
     low_dim:
-      core_class: null
-      core_kwargs: {}
-      obs_randomizer_class: null
+      core_class: null          # 编码器核心类（null 表示不使用编码器）
+      core_kwargs: {}           # 编码器参数
+      obs_randomizer_class: null # 观察随机化器（数据增强）
       obs_randomizer_kwargs: {}
+
+    # RGB 图像编码器配置
     rgb:
-      core_class: VisualCore
-      fuser: null
+      core_class: VisualCore     # 视觉编码器核心类
+      fuser: null               # 多相机融合器（null 表示不融合）
       core_kwargs:
-        feature_dimension: 512
-        flatten: true
-        backbone_class: ResNet50Conv
+        feature_dimension: 512   # 输出特征维度
+        flatten: true            # 是否展平特征
+        backbone_class: ResNet50Conv  # 骨干网络：ResNet50 卷积网络
         backbone_kwargs:
-          pretrained: true
-          use_cam: false
-          downsample: false
-        pool_class: null
+          pretrained: true       # 是否使用预训练权重
+          use_cam: false         # 是否使用相机参数
+          downsample: false      # 是否下采样
+        pool_class: null        # 池化层类
         pool_kwargs: null
+      # 观察随机化器（数据增强）
       obs_randomizer_class:
-        - ColorRandomizer
-        - CropRandomizer
+        - ColorRandomizer        # 颜色随机化（亮度、对比度等）
+        - CropRandomizer         # 裁剪随机化
       obs_randomizer_kwargs:
-        - {}
-        - {crop_height: 116, crop_width: 116, num_crops: 1, pos_enc: false}
+        - {}                     # ColorRandomizer 参数（使用默认值）
+        - {crop_height: 116, crop_width: 116, num_crops: 1, pos_enc: false}  # CropRandomizer 参数
+
+    # 深度图像编码器（未使用）
     depth:
       core_class: VisualCore
       core_kwargs: {}
       obs_randomizer_class: null
       obs_randomizer_kwargs: {}
+
+    # 激光扫描编码器（未使用）
     scan:
       core_class: ScanCore
       core_kwargs: {}
