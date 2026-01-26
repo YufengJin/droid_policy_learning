@@ -94,6 +94,14 @@ class LearnedPolicyController:
                 print(f"  Prompt: '{self.prompt}'")
             else:
                 print("  Prompt: (none)")
+            action_type = getattr(self.config.train, "action_type", None)
+            if action_type is None:
+                try:
+                    action_type = self.config.train.get("action_type", None)
+                except Exception:
+                    action_type = None
+            if action_type:
+                print(f"  Action type: {action_type}")
             print(f"  Obs horizon: {self.obs_horizon}")
             print(f"  Action horizon: {self.action_horizon}")
             print(f"  Cameras: {len(self.camera_keys)}")

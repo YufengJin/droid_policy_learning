@@ -20,7 +20,9 @@ import numpy as np
 import tensorflow as tf
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.action_utils as ActionUtils
+from collections import defaultdict
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from robomimic.config import config_factory
 from robomimic.algo import algo_factory
 from robomimic.utils.rlds_utils import (
@@ -108,6 +110,22 @@ def _enable_ddim_inference(model, config, num_inference_timesteps=10):
         set_alpha_to_one=ddim_cfg.set_alpha_to_one,
         steps_offset=ddim_cfg.steps_offset,
         prediction_type=ddim_cfg.prediction_type,
+    )
+
+
+def _enable_ddpm_inference(model, config, num_inference_timesteps=None):
+    """Switch to DDPM sampler (match training by default)."""
+    ddpm_cfg = config.algo.ddpm
+    with config.unlocked():
+        config.algo.ddim.enabled = False
+        config.algo.ddpm.enabled = True
+        if num_inference_timesteps is not None:
+            config.algo.ddpm.num_inference_timesteps = int(num_inference_timesteps)
+    model.noise_scheduler = DDPMScheduler(
+        num_train_timesteps=ddpm_cfg.num_train_timesteps,
+        beta_schedule=ddpm_cfg.beta_schedule,
+        clip_sample=ddpm_cfg.clip_sample,
+        prediction_type=ddpm_cfg.prediction_type,
     )
 
 
@@ -333,6 +351,33 @@ def _get_action_sequence(model, obs_dict, action_horizon):
 def _unnormalize_actions(actions, config, action_norm_stats):
     if action_norm_stats is None:
         return None
+
+
+def _shift_mae(pred, gt, shift=0):
+    if pred.shape[0] <= abs(shift):
+        return float("nan")
+    if shift == 0:
+        return np.abs(pred - gt).mean()
+    if shift > 0:
+        return np.abs(pred[shift:] - gt[:-shift]).mean()
+    s = -shift
+    return np.abs(pred[:-s] - gt[s:]).mean()
+
+
+def _per_key_mae(pred_vec, gt_vec, action_keys, action_shapes):
+    """Return per-key, per-dim MAE arrays."""
+    pred_dict = ActionUtils.vector_to_action_dict(pred_vec, action_shapes=action_shapes, action_keys=action_keys)
+    gt_dict = ActionUtils.vector_to_action_dict(gt_vec, action_shapes=action_shapes, action_keys=action_keys)
+    out = {}
+    for key in action_keys:
+        p = np.asarray(pred_dict[key])
+        g = np.asarray(gt_dict[key])
+        # mean over time dimension(s), keep last dim
+        err = np.abs(p - g)
+        while err.ndim > 1:
+            err = err.mean(axis=0)
+        out[key] = err
+    return out
     try:
         action_keys = list(config.train.action_keys)
         action_shapes = {
@@ -364,10 +409,23 @@ def main():
         help="Language instruction (optional, if not provided uses vision-only mode)",
     )
     parser.add_argument(
+        "--sampler",
+        type=str,
+        default="ddim",
+        choices=["ddim", "ddpm"],
+        help="Inference sampler to use (ddim or ddpm).",
+    )
+    parser.add_argument(
         "--ddim-steps",
         type=int,
         default=10,
         help="Number of DDIM inference steps (faster than DDPM).",
+    )
+    parser.add_argument(
+        "--ddpm-steps",
+        type=int,
+        default=None,
+        help="Number of DDPM inference steps (default: config).",
     )
     parser.add_argument("--device", type=str, default="cuda", help="Device to run inference on (cpu or cuda)")
     parser.add_argument(
@@ -379,6 +437,11 @@ def main():
         "--report-unnormalized",
         action="store_true",
         help="Also report error in unnormalized action units if stats are available.",
+    )
+    parser.add_argument(
+        "--debug-eval",
+        action="store_true",
+        help="Print debug stats (action ranges, zero baseline, shift MAE).",
     )
     parser.add_argument(
         "--num-runs",
@@ -400,7 +463,10 @@ def main():
 
     # Load model
     model, config, shape_meta, action_stats = load_model(args.checkpoint, args.device, verbose)
-    _enable_ddim_inference(model, config, num_inference_timesteps=args.ddim_steps)
+    if args.sampler == "ddim":
+        _enable_ddim_inference(model, config, num_inference_timesteps=args.ddim_steps)
+    else:
+        _enable_ddpm_inference(model, config, num_inference_timesteps=args.ddpm_steps)
 
     # Display configuration
     if verbose:
@@ -410,7 +476,19 @@ def main():
             print(f"   Prompt: '{args.prompt}'")
         else:
             print("   Mode: Vision-only (no language prompt)")
-        print(f"   Sampler: DDIM ({args.ddim_steps} steps)")
+        action_type = getattr(config.train, "action_type", None)
+        if action_type is None:
+            try:
+                action_type = config.train.get("action_type", None)
+            except Exception:
+                action_type = None
+        if action_type:
+            print(f"   Action type: {action_type}")
+        if args.sampler == "ddim":
+            print(f"   Sampler: DDIM ({args.ddim_steps} steps)")
+        else:
+            steps = args.ddpm_steps if args.ddpm_steps is not None else config.algo.ddpm.num_inference_timesteps
+            print(f"   Sampler: DDPM ({steps} steps)")
         action_dim = sum([ac_comp[1] for ac_comp in config.train.action_shapes])
         print(f"   Action dim: {action_dim}")
         print(f"   Obs horizon: {config.algo.horizon.observation_horizon}")
@@ -429,6 +507,12 @@ def main():
     traj_mae_means = []
     traj_l2_unnorm = []
     traj_mae_unnorm = []
+    dbg_shift_mae = { -1: [], 0: [], 1: [] }
+    dbg_zero_mae = []
+    dbg_shift_mae_un = { -1: [], 0: [], 1: [] }
+    dbg_zero_mae_un = []
+    dbg_key_mae = defaultdict(list)
+    dbg_key_mae_un = defaultdict(list)
     infer_times = []
     evaluated = 0
 
@@ -476,6 +560,46 @@ def main():
                     traj_mae_unnorm.append(np.abs(diff_un).mean())
             if verbose and ep_idx == 0:
                 print(f"\n  first-episode mean L2 error: {traj_l2_means[-1]:.6f}")
+            if args.debug_eval:
+                pred_slice = pred_actions[:min_len]
+                gt_slice = gt_actions[:min_len]
+                action_keys = list(config.train.action_keys)
+                action_shapes = {
+                    k: tuple(action_stats[k]["offset"].shape[1:]) if (action_stats and k in action_stats) else tuple(config.train.action_shapes[action_keys.index(k)])
+                    for k in action_keys
+                }
+                per_key = _per_key_mae(pred_slice, gt_slice, action_keys, action_shapes)
+                for k, v in per_key.items():
+                    dbg_key_mae[k].append(v)
+                for s in (-1, 0, 1):
+                    dbg_shift_mae[s].append(_shift_mae(pred_slice, gt_slice, shift=s))
+                dbg_zero_mae.append(np.abs(gt_slice).mean())
+                if args.report_unnormalized:
+                    pred_un = _unnormalize_actions(pred_slice, config, action_stats)
+                    gt_un = _unnormalize_actions(gt_slice, config, action_stats)
+                    if pred_un is not None and gt_un is not None:
+                        per_key_un = _per_key_mae(pred_un, gt_un, action_keys, action_shapes)
+                        for k, v in per_key_un.items():
+                            dbg_key_mae_un[k].append(v)
+                        for s in (-1, 0, 1):
+                            dbg_shift_mae_un[s].append(_shift_mae(pred_un, gt_un, shift=s))
+                        dbg_zero_mae_un.append(np.abs(gt_un).mean())
+                if verbose and ep_idx == 0:
+                    print("\n🔎 Debug (normalized action space):")
+                    print(f"   pred min/max: {pred_slice.min():.3f} / {pred_slice.max():.3f}")
+                    print(f"   gt   min/max: {gt_slice.min():.3f} / {gt_slice.max():.3f}")
+                    print(f"   zero-action MAE: {dbg_zero_mae[-1]:.6f}")
+                    print(f"   shift MAE (pred vs gt+1): {dbg_shift_mae[-1][-1]:.6f}")
+                    print(f"   shift MAE (aligned):      {dbg_shift_mae[0][-1]:.6f}")
+                    print(f"   shift MAE (pred vs gt-1): {dbg_shift_mae[1][-1]:.6f}")
+                    if args.report_unnormalized and len(dbg_zero_mae_un) > 0:
+                        print("\n🔎 Debug (unnormalized action units):")
+                        print(f"   pred min/max: {pred_un.min():.3f} / {pred_un.max():.3f}")
+                        print(f"   gt   min/max: {gt_un.min():.3f} / {gt_un.max():.3f}")
+                        print(f"   zero-action MAE: {dbg_zero_mae_un[-1]:.6f}")
+                        print(f"   shift MAE (pred vs gt+1): {dbg_shift_mae_un[-1][-1]:.6f}")
+                        print(f"   shift MAE (aligned):      {dbg_shift_mae_un[0][-1]:.6f}")
+                        print(f"   shift MAE (pred vs gt-1): {dbg_shift_mae_un[1][-1]:.6f}")
         evaluated += 1
 
     if evaluated == 0:
@@ -510,6 +634,50 @@ def main():
             if len(times) > 1:
                 print(f"   Avg: {ms_per_action.mean():.2f} ms/action ± {ms_per_action.std():.2f}")
                 print(f"   Avg: {fps.mean():.3f} actions/sec ± {fps.std():.3f}")
+
+        if args.debug_eval:
+            print("\n🔎 Debug summary (normalized action space):")
+            for s in (-1, 0, 1):
+                vals = np.array(dbg_shift_mae[s], dtype=float)
+                if vals.size > 0:
+                    print(f"   shift {s:+d} MAE: {np.nanmean(vals):.6f} ± {np.nanstd(vals):.6f}")
+            if len(dbg_zero_mae) > 0:
+                z = np.array(dbg_zero_mae, dtype=float)
+                print(f"   zero-action MAE: {np.nanmean(z):.6f} ± {np.nanstd(z):.6f}")
+            if len(dbg_key_mae) > 0:
+                print("\n🔎 Per-key MAE (normalized):")
+                for key, arrs in dbg_key_mae.items():
+                    stacked = np.stack(arrs, axis=0)
+                    mean = stacked.mean(axis=0)
+                    if key.endswith("joint_position"):
+                        labels = [f"j{i}" for i in range(mean.shape[0])]
+                    elif key.endswith("gripper_position"):
+                        labels = ["gripper"]
+                    else:
+                        labels = [f"d{i}" for i in range(mean.shape[0])]
+                    items = ", ".join([f"{l}:{v:.4f}" for l, v in zip(labels, mean)])
+                    print(f"   {key}: {items}")
+            if args.report_unnormalized and len(dbg_zero_mae_un) > 0:
+                print("\n🔎 Debug summary (unnormalized action units):")
+                for s in (-1, 0, 1):
+                    vals = np.array(dbg_shift_mae_un[s], dtype=float)
+                    if vals.size > 0:
+                        print(f"   shift {s:+d} MAE: {np.nanmean(vals):.6f} ± {np.nanstd(vals):.6f}")
+                z = np.array(dbg_zero_mae_un, dtype=float)
+                print(f"   zero-action MAE: {np.nanmean(z):.6f} ± {np.nanstd(z):.6f}")
+                if len(dbg_key_mae_un) > 0:
+                    print("\n🔎 Per-key MAE (unnormalized):")
+                    for key, arrs in dbg_key_mae_un.items():
+                        stacked = np.stack(arrs, axis=0)
+                        mean = stacked.mean(axis=0)
+                        if key.endswith("joint_position"):
+                            labels = [f"j{i}" for i in range(mean.shape[0])]
+                        elif key.endswith("gripper_position"):
+                            labels = ["gripper"]
+                        else:
+                            labels = [f"d{i}" for i in range(mean.shape[0])]
+                        items = ", ".join([f"{l}:{v:.4f}" for l, v in zip(labels, mean)])
+                        print(f"   {key}: {items}")
 
     if verbose:
         print("\n✓ Done!")

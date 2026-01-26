@@ -998,6 +998,27 @@ class DiffusionPolicyUNet(PolicyAlgo):
                 new_state[new_key] = v
             nets_state = new_state
         
+        # If input dimensions changed (e.g., adding low_dim), pad matching linear weights.
+        current_state = self.nets.state_dict()
+        quiet = os.environ.get("ROBOMIMIC_QUIET", "0") == "1"
+        for k, v in list(nets_state.items()):
+            if k not in current_state:
+                continue
+            cur = current_state[k]
+            if v.shape == cur.shape:
+                continue
+            # Handle Linear weights where in_features changed (pad or truncate).
+            if v.ndim == 2 and cur.ndim == 2 and v.shape[0] == cur.shape[0]:
+                if v.shape[1] < cur.shape[1]:
+                    padded = torch.zeros_like(cur)
+                    padded[:, :v.shape[1]] = v
+                    nets_state[k] = padded
+                    if not quiet:
+                        print(f"WARNING: padded weight {k} from {tuple(v.shape)} -> {tuple(cur.shape)}")
+                elif v.shape[1] > cur.shape[1]:
+                    nets_state[k] = v[:, :cur.shape[1]]
+                    if not quiet:
+                        print(f"WARNING: truncated weight {k} from {tuple(v.shape)} -> {tuple(cur.shape)}")
         self.nets.load_state_dict(nets_state)
         ema_state = model_dict.get("ema", None)
         if ema_state is not None and self.ema is not None:
