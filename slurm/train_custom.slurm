@@ -28,7 +28,7 @@ trap 'status=$?; now=$(date "+%F %T"); echo "[EXIT $now] code=$status"; [[ $stat
 module load python
 # 推荐：在集群侧做一次 conda init bash，保证非交互 shell 能 activate
 source ~/.bashrc 2>/dev/null || true
-conda activate droid_policy_learning
+conda activate droid_policy_learning_env
 
 ################################################################################
 # 3) 代理设置
@@ -49,13 +49,20 @@ export MKL_NUM_THREADS=1
 echo "[$(date +'%F %T')] Staging dataset to TMPDIR=${TMPDIR}"
 
 WORK_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning"
-DATA_SOURCE="$WORK/dataset/droid"
-DATA_ROOT="$TMPDIR/droid"
+OUTPUT_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning/outputs"
+# DATA_SOURCE="$WORK/datasets/droid"
+DATA_SOURCE="/home/atuin/g108ea/g108ea10/datasets/droid/insert_pin"
+DATA_ROOT="$TMPDIR/datasets/insert_pin"
+
+# 复制前检查源存在
+if [[ ! -d "$DATA_SOURCE" ]]; then
+  echo "[ERR] DATA_SOURCE not found: $DATA_SOURCE"; exit 2
+fi
 
 if [[ ! -d "$DATA_ROOT" ]]; then
   echo "Copying dataset from $DATA_SOURCE to $DATA_ROOT..."
+  mkdir -p "$(dirname "$DATA_ROOT")"
   start_time=$(date +%s)
-  # 使用 rsync 或 cp 复制数据集
   if command -v rsync >/dev/null 2>&1; then
     rsync -av --progress "$DATA_SOURCE/" "$DATA_ROOT/"
   else
@@ -83,17 +90,13 @@ cd $WORK_DIR
 ################################################################################
 # 7) 启动训练
 ################################################################################
-# 输出目录（可根据需要修改）
-OUTPUT_DIR="$TMPDIR/logs/droid/im/diffusion_policy"
 mkdir -p "$OUTPUT_DIR"
 
 echo "[INFO] Starting training at $(date +'%F %T')"
 
 python -m robomimic.scripts.train_rlds \
-  train.data_path="$DATA_ROOT" \
+  train.data_path="$TMPDIR/datasets" \
   train.output_dir="${OUTPUT_DIR}" \
-  train.dataset_names=[droid]
+  train.dataset_names=[insert_pin]
 
 echo "[INFO] Training completed at $(date +'%F %T')"
-
-rsync -av "$OUTPUT_DIR/" "$WORK_DIR/logs/droid/im/diffusion_policy_$(date +'%Y-%m-%d_%H-%M-%S')/"
