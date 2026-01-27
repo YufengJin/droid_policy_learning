@@ -36,10 +36,12 @@ import tensorflow as tf
 import robomimic
 import robomimic.utils.train_utils as TrainUtils
 import robomimic.utils.torch_utils as TorchUtils
+import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.action_utils as ActionUtils
 import robomimic.utils.file_utils as FileUtils
+import robomimic.utils.eval_utils as EvalUtils
 from robomimic.utils.dataset import action_stats_to_normalization_stats
 from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
@@ -472,9 +474,71 @@ def train(config, device):
                 print("MSE Log Epoch {}".format(epoch))
                 print(json.dumps(mse_log, sort_keys=True, indent=4))
         else:
+            # RLDS format: compute MSE for cartesian_position error
+            should_save_mse = False
+            if config.experiment.mse.enabled:
+                if config.experiment.mse.every_n_epochs is not None and epoch % config.experiment.mse.every_n_epochs == 0:
+                    should_save_mse = True
+                if config.experiment.mse.on_save_ckpt and should_save_ckpt:
+                    should_save_mse = True
+            
+            if should_save_mse:
+                print("Computing MSE for RLDS dataset ...")
+                model.set_eval()
+                
+                # Reset model state (initialize action_queue and obs_queue for diffusion policy)
+                model.reset()
+                
+                # Process batch for inference
+                input_batch = model.process_batch_for_training(rlds_batch)
+                input_batch = model.postprocess_batch_for_training(input_batch, obs_normalization_stats=None)
+                
+                # Get predicted actions
+                with torch.no_grad():
+                    predicted_actions = model.get_action(input_batch["obs"])
+                    actual_actions = input_batch["actions"]
+                
+                # Convert to numpy
+                predicted_actions_np = TensorUtils.to_numpy(predicted_actions)
+                actual_actions_np = TensorUtils.to_numpy(actual_actions)
+                
+                # Extract cartesian_position (first 3 dimensions: pos) and rotation (next 6 dimensions: rot_6d)
+                # Note: action format is [pos (3D), rot_6d (6D), gripper_position (1D)]
+                predicted_pos = predicted_actions_np[..., :3]  # (B, T, 3) or (B, 3)
+                actual_pos = actual_actions_np[..., :3]  # (B, T, 3) or (B, 3)
+                predicted_rot = predicted_actions_np[..., 3:9]  # (B, T, 6) or (B, 6)
+                actual_rot = actual_actions_np[..., 3:9]  # (B, T, 6) or (B, 6)
+                
+                # Compute position error using eval_utils
+                pos_err_stats = EvalUtils.compute_pos_err(predicted_pos, actual_pos)
+                
+                # Compute rotation error in radians using eval_utils
+                rot_err_stats = EvalUtils.compute_rot_err(predicted_rot, actual_rot, rot_format='6d')
+                
+                mse_log = {
+                    "evaluate/cartesian_position_error/mean": pos_err_stats['mean'],
+                    "evaluate/cartesian_position_error/max": pos_err_stats['max'],
+                    "evaluate/cartesian_position_error/min": pos_err_stats['min'],
+                    "evaluate/cartesian_position_error/std": pos_err_stats['std'],
+                    "evaluate/cartesian_position_error/mse": pos_err_stats['mse'],
+                    "evaluate/rotation_error/mean": rot_err_stats['mean'],
+                    "evaluate/rotation_error/max": rot_err_stats['max'],
+                    "evaluate/rotation_error/min": rot_err_stats['min'],
+                    "evaluate/rotation_error/std": rot_err_stats['std'],
+                    "evaluate/rotation_error/mse": rot_err_stats.get('mse', 0.0),  # MSE of 6D representation
+                }
+                
+                # Log to data logger
+                for k, v in mse_log.items():
+                    data_logger.record("{}".format(k), v, epoch)
+                
+                print("MSE Log Epoch {}".format(epoch))
+                print(json.dumps(mse_log, sort_keys=True, indent=4))
+                
+                model.set_train()
+            
+            # Batch visualization
             should_save_batch_samples = False
-            # TODO(Ashwin): eventually clean up to use different config parameters for
-            # batch visualization vs. mse visualization
             if config.experiment.mse.enabled:
                 if config.experiment.mse.every_n_epochs is not None and epoch % config.experiment.mse.every_n_epochs == 0:
                     should_save_batch_samples = True

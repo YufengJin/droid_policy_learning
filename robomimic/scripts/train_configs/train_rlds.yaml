@@ -47,7 +47,7 @@ experiment:
                                   # 在 train.py:73 中，会将 stdout/stderr 重定向到日志文件
     log_tb: true                  # 是否启用 TensorBoard 日志
                                   # 日志保存在 {log_dir}/events.out.tfevents.*
-    log_wandb: false               # 是否启用 Weights & Biases 日志
+    log_wandb: true               # 是否启用 Weights & Biases 日志
     wandb_proj_name: diffusion_policy_droid  # WandB 项目名称
 
   # MSE (均方误差) 评估配置
@@ -130,7 +130,7 @@ train:
   # RLDS 数据集配置
   data_path: /workspace/dataset  # RLDS 数据集根目录
                                  # 在 train.py:99 中使用: BASE_DATASET_KWARGS["data_dir"]
-  dataset_names: [droid_100]     # 要使用的数据集名称列表
+  dataset_names: [insert_pin]     # 要使用的数据集名称列表
                                  # 在 train.py:110 中使用，支持多个数据集联合训练
                                  # 例如: [droid_100, role_ros2]
   sample_weights: [1]            # 每个数据集的采样权重
