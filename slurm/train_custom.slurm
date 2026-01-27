@@ -42,6 +42,8 @@ export https_proxy=http://proxy.nhr.fau.de:80
 # 线程限制，避免与 DataLoader 抢 CPU
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
+# 非交互模式
+export nointeractive=yes
 
 ################################################################################
 # 5) 数据缓存到 $TMPDIR（节点本地盘）
@@ -97,6 +99,7 @@ echo "[INFO] Starting training at $(date +'%F %T')"
 python -m robomimic.scripts.train_rlds \
   train.data_path="$TMPDIR/datasets" \
   train.output_dir="${OUTPUT_DIR}" \
+  train.batch_size=1024 \
   train.dataset_names=[insert_pin]
 
 echo "[INFO] Training completed at $(date +'%F %T')"
