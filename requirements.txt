@@ -1,4 +1,4 @@
-numpy>=1.13.3
+numpy>=1.13.3,<2.0
 h5py
 psutil
 tqdm
@@ -12,6 +12,6 @@ egl_probe>=1.0.1
 torch==2.0.1
 torchvision
 diffusers==0.11.1
-opencv-python
+opencv-python<4.10.0
 transformers==4.34.0
 hydra-core>=1.1.0
