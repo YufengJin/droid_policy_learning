@@ -35,7 +35,9 @@ algo_name: diffusion_policy  # 使用的算法名称，用于创建对应的配�
 experiment:
   # 实验名称，用于创建输出目录
   # 输出路径: {output_dir}/{name}/{timestamp}/
-  name: train_rlds
+  # 如果为 null，将自动生成实验名称（基于算法名称、数据集名称和时间戳）
+  # 如果提供名称，将使用提供的名称
+  name: null
 
   # 是否启用验证集评估
   # 注意: RLDS 格式 (droid_rlds) 目前不支持验证集分割

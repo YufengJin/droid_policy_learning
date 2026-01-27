@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import traceback
+import datetime
 
 # Add robomimic package to path when running as script
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +67,35 @@ def run(cfg: "OmegaConf") -> str:
     config = config_factory(cfg_dict["algo_name"])
     with config.values_unlocked():
         config.update(cfg_dict)
+    
+    # Auto-generate experiment name if not provided
+    exp_name = config.experiment.name
+    if exp_name is None or exp_name == "null" or (isinstance(exp_name, str) and exp_name.strip() == ""):
+        # Generate experiment name based on algo_name, dataset_names, and timestamp
+        algo_name = config.algo_name
+        
+        # Get dataset names
+        dataset_names = config.train.dataset_names
+        if isinstance(dataset_names, list) and len(dataset_names) > 0:
+            # Use first dataset name, or combine if multiple
+            if len(dataset_names) == 1:
+                dataset_str = dataset_names[0]
+            else:
+                dataset_str = "_".join(dataset_names[:2])  # Use first 2 datasets
+                if len(dataset_names) > 2:
+                    dataset_str += f"_plus{len(dataset_names)-2}"
+        else:
+            dataset_str = "unknown_dataset"
+        
+        # Add timestamp for uniqueness (format: YYYYMMDD_HHMMSS)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Generate name: algo_dataset_timestamp
+        auto_name = f"{algo_name}_{dataset_str}_{timestamp}"
+        config.experiment.name = auto_name
+        print(f"[INFO] Auto-generated experiment name: {auto_name}")
+    else:
+        print(f"[INFO] Using provided experiment name: {exp_name}")
 
     device = TorchUtils.get_torch_device(try_to_use_cuda=config.train.cuda)
 
