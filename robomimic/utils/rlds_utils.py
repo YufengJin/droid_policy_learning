@@ -41,13 +41,12 @@ def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def robomimic_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
-    # Keep images uint8 [0,255]; /255 is done once in ObsUtils.process_obs_dict (process_frame).
     return {
         "obs": {
             "camera/image/varied_camera_1_left_image": 
-                trajectory["observation"]["image_primary"],
+                tf.cast(trajectory["observation"]["image_primary"], tf.float32) / 255.0,             # role-ros2/droid dataset is uint8 [0,255]
             "camera/image/varied_camera_2_left_image": 
-                trajectory["observation"]["image_secondary"],
+                tf.cast(trajectory["observation"]["image_secondary"], tf.float32) / 255.0,             # role-ros2/droid dataset is uint8 [0,255]
             "raw_language": trajectory["task"]["language_instruction"],
             "robot_state/cartesian_position": trajectory["observation"]["proprio"][..., :6],
             "robot_state/gripper_position": trajectory["observation"]["proprio"][..., -1:],
@@ -57,9 +56,9 @@ def robomimic_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 DROID_TO_RLDS_OBS_KEY_MAP = {
-    # "camera/image/varied_camera_1_left_image": "exterior_image_1_left",
+    # "camera/image/varied_camera_1_left_image": "exterior_image_1_left",    
     # "camera/image/varied_camera_2_left_image": "exterior_image_2_left"
-    "camera/image/varied_camera_1_left_image": "wrist_image_left",
+    "camera/image/varied_camera_1_left_image": "wrist_image_left",   
     "camera/image/varied_camera_2_left_image": "exterior_image_1_left"
 }
 

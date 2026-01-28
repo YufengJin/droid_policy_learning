@@ -61,7 +61,7 @@ def run(cfg: "OmegaConf") -> str:
     if not isinstance(cfg_dict, dict):
         raise TypeError("Resolved config is not a dict")
     cfg_dict.pop("load_from", None)
-    cfg_dict.pop("debug", None)
+    cfg_dict.pop("debug", None)  # Hydra-only: 已用 OmegaConf 读出，不写入 robomimic config（config 无此 key）
 
     # Build robomimic config
     config = config_factory(cfg_dict["algo_name"])
@@ -111,10 +111,14 @@ def run(cfg: "OmegaConf") -> str:
         config.experiment.rollout.n = 2
         config.experiment.rollout.horizon = 10
         config.train.output_dir = "/tmp/tmp_trained_models"
+        # 关闭实验日志（TensorBoard、WandB、终端输出到文件）
+        config.experiment.logging.terminal_output_to_txt = True
+        config.experiment.logging.log_tb = False
+        config.experiment.logging.log_wandb = False
 
     config.lock()
 
-    train(config, device=device)
+    train(config, device=device, debug=debug)
     return "finished run successfully!"
 
 

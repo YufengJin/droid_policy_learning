@@ -53,9 +53,14 @@ from octo.data.utils.data_utils import combine_dataset_statistics
 from octo.utils.spec import ModuleSpec
 
 
-def train(config, device):
+def train(config, device, debug=False):
     """
     Train a model using the algorithm.
+
+    Args:
+        config: training config
+        device: torch device
+        debug: if True, run debug-only actions (e.g. print batch keys/shapes/dtypes before training)
     """
 
     # first set seeds
@@ -326,6 +331,28 @@ def train(config, device):
     # number of learning steps per epoch (defaults to a full dataset pass)
     train_num_steps = config.experiment.epoch_every_n_steps
     valid_num_steps = config.experiment.validation_epoch_every_n_steps
+
+    # [DEBUG] print one batch's keys, tensor shapes and dtypes before training
+    if debug:
+        def _print_batch_shape_dtype(x, prefix="batch"):
+            if isinstance(x, (dict, OrderedDict)):
+                print("{} keys: {}".format(prefix, list(x.keys())))
+                for k, v in x.items():
+                    _print_batch_shape_dtype(v, prefix="{}[{!r}]".format(prefix, k))
+            elif isinstance(x, (list, tuple)):
+                print("{} ({} len={})".format(prefix, type(x).__name__, len(x)))
+                for i, v in enumerate(x):
+                    _print_batch_shape_dtype(v, prefix="{}[{}]".format(prefix, i))
+            elif hasattr(x, "shape") and hasattr(x, "dtype"):
+                print("{}: shape={}, dtype={}".format(prefix, x.shape, x.dtype))
+            else:
+                print("{}: type={}".format(prefix, type(x).__name__))
+
+        _debug_iter = iter(train_loader)
+        _sample_batch = next(_debug_iter)
+        print("\n============= [DEBUG] Data batch: keys, shapes, dtypes =============\n")
+        _print_batch_shape_dtype(_sample_batch, "batch")
+        print("\n====================================================================\n")
 
     data_loader_iter = iter(train_loader)
     for epoch in range(1, config.train.num_epochs + 1): # epoch numbers start at 1
@@ -637,7 +664,7 @@ def main(args):
     # catch error during training and print it
     res_str = "finished run successfully!"
     try:
-        train(config, device=device)
+        train(config, device=device, debug=args.debug)
     except Exception as e:
         res_str = "run failed with error:\n{}\n\n{}".format(e, traceback.format_exc())
     print(res_str)

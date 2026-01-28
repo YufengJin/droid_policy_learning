@@ -22,6 +22,7 @@ debug: false     # Debug 模式开关
                  #   - num_epochs = 200
                  #   - rollout.rate = 1, rollout.n = 2, rollout.horizon = 10
                  #   - output_dir = "/tmp/tmp_trained_models"
+                 #   - experiment logging 关闭：terminal_output_to_txt / log_tb / log_wandb = false
 
 # ----------------------------------------------------------------------------
 # 算法配置
