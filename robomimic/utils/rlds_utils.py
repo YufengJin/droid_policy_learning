@@ -74,12 +74,26 @@ class TorchRLDSDataset(torch.utils.data.IterableDataset):
         self,
         rlds_dataset,
         train=True,
+        rank=0,
+        world_size=1,
     ):
+        """
+        Args:
+            rlds_dataset: Octo RLDS dataset.
+            train: whether this is training split.
+            rank: for DDP, this process's rank (0..world_size-1). Used to shard data.
+            world_size: for DDP, total number of processes. If world_size > 1, each rank
+                only yields samples where (index % world_size) == rank.
+        """
         self._rlds_dataset = rlds_dataset
         self._is_train = train
+        self._rank = rank
+        self._world_size = world_size
 
     def __iter__(self):
-        for sample in self._rlds_dataset.as_numpy_iterator():
+        for i, sample in enumerate(self._rlds_dataset.as_numpy_iterator()):
+            if self._world_size > 1 and (i % self._world_size) != self._rank:
+                continue
             yield sample
 
     def __len__(self):
@@ -93,7 +107,10 @@ class TorchRLDSDataset(torch.utils.data.IterableDataset):
             lengths *= np.array(self._rlds_dataset.sample_weights)
         total_len = lengths.sum()
         if self._is_train:
-            return int(0.95 * total_len)
+            total_len = int(0.95 * total_len)
         else:
-            return int(0.05 * total_len)
+            total_len = int(0.05 * total_len)
+        if self._world_size > 1:
+            total_len = (total_len + self._world_size - 1) // self._world_size
+        return total_len
 
