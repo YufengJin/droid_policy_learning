@@ -18,10 +18,16 @@ Usage:
   python -m robomimic.scripts.train_ddp
 
 Config 始终通过 Hydra 从 robomimic/scripts/train_configs 读取（与 train_rlds 一致）；运行用 torchrun。
+
+正确退出与端口（MASTER_PORT，默认 29500）:
+  - 脚本正常结束或按 Ctrl+C：会调用 cleanup_ddp()，进程退出后端口自动释放，无需手动关端口。
+  - 若用调试器点「Stop」只杀主进程、子进程未退出，端口可能仍被占：可先 pkill -f train_ddp 或换端口
+    MASTER_PORT=29501 torchrun ...
 """
 
 import json
 import os
+import signal
 import sys
 import traceback
 import datetime
@@ -81,8 +87,20 @@ def setup_ddp():
 
 
 def cleanup_ddp():
+    """Destroy DDP process group so the process exits cleanly and releases MASTER_PORT (default 29500)."""
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+def _register_signal_handlers():
+    """On SIGINT/SIGTERM (e.g. Ctrl+C), cleanup DDP and exit so the port is released. No need to manually kill the port."""
+
+    def _handler(signum, frame):
+        cleanup_ddp()
+        sys.exit(128 + (signum if signum is not None else 0))
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
 
 
 def get_config_from_args():
@@ -565,6 +583,7 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
 
 def main():
     rank, world_size, local_rank, use_ddp = setup_ddp()
+    _register_signal_handlers()
     try:
         config, debug = get_config_from_args()
         device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")

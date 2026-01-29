@@ -84,13 +84,18 @@ class DataLogger(object):
                         mode=("offline" if attempt == num_attempts - 1 else "online"),
                     )
 
-                    # set up info for identifying experiment
-                    wandb_config = {k: v for (k, v) in config.meta.items() if k not in ["hp_keys", "hp_values"]}
-                    for (k, v) in zip(config.meta["hp_keys"], config.meta["hp_values"]):
-                        wandb_config[k] = v
-                    if "algo" not in wandb_config:
-                        wandb_config["algo"] = config.algo_name
-                    self._wandb_logger.config.update(wandb_config)
+                    # log full config to wandb (train.py / train_ddp.py / train_rlds.py all use this DataLogger)
+                    if hasattr(config, "to_dict") and callable(getattr(config, "to_dict")):
+                        full_config_dict = config.to_dict()
+                        self._wandb_logger.config.update(full_config_dict, allow_val_change=True)
+                    else:
+                        # fallback: meta + hp + algo (original behavior)
+                        wandb_config = {k: v for (k, v) in config.meta.items() if k not in ["hp_keys", "hp_values"]}
+                        for (k, v) in zip(config.meta["hp_keys"], config.meta["hp_values"]):
+                            wandb_config[k] = v
+                        if "algo" not in wandb_config:
+                            wandb_config["algo"] = config.algo_name
+                        self._wandb_logger.config.update(wandb_config)
 
                     break
                 except Exception as e:

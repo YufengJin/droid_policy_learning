@@ -910,6 +910,8 @@ class ImageModality(Modality):
         Given image fetched from dataset, process for network input. Converts array
         to float (from uint8), normalizes pixels from range [0, 255] to [0, 1], and channel swaps
         from (H, W, C) to (C, H, W).
+        If obs is already float in [0, 1] (e.g. from RLDS robomimic_transform), skip /255
+        to avoid double normalization.
 
         Args:
             obs (np.array or torch.Tensor): image array
@@ -917,7 +919,13 @@ class ImageModality(Modality):
         Returns:
             processed_obs (np.array or torch.Tensor): processed image
         """
-        return process_frame(frame=obs, channel_dim=3, scale=255.)
+        obs_float = TU.to_float(obs)
+        if isinstance(obs_float, torch.Tensor):
+            already_01 = obs_float.is_floating_point() and obs_float.max().item() <= 1.0 + 1e-5
+        else:
+            already_01 = np.issubdtype(obs_float.dtype, np.floating) and float(np.max(obs_float)) <= 1.0 + 1e-5
+        scale = 1.0 if already_01 else 255.0
+        return process_frame(frame=obs, channel_dim=3, scale=scale)
 
     @classmethod
     def _default_obs_unprocessor(cls, obs):
