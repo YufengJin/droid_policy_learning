@@ -1,0 +1,102 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug train_rlds.py (custom)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robomimic.scripts.train_rlds",
+      "args": [
+        "debug=true",
+        "train.dataset_names=[insert_pin_fixed]"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "/opt/conda/envs/droid_env/bin/python"
+    },
+    {
+      "name": "Debug train_rlds.py (role_ros2)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robomimic.scripts.train_rlds",
+      "args": [
+        "train.dataset_names=[role_ros2]"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "/opt/conda/envs/droid_env/bin/python"
+    },
+    {
+      "name": "Debug train_rlds.py (droid_100)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robomimic.scripts.train_rlds",
+      "args": [
+        "debug=true",
+        "train.dataset_names=[droid_100]"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "/opt/conda/envs/droid_env/bin/python"
+    },
+    {
+      "name": "train_rlds + R3M backbone (Hydra)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robomimic.scripts.train_rlds",
+      "args": [
+        "debug=true",
+        "observation.encoder.rgb.core_kwargs.backbone_class=R3MConv",
+        "observation.encoder.rgb.core_kwargs.feature_dimension=512",
+        "observation.encoder.rgb.core_kwargs.flatten=true",
+        "observation.encoder.rgb.core_kwargs.backbone_kwargs.r3m_model_class=resnet18",
+        "observation.encoder.rgb.core_kwargs.backbone_kwargs.freeze=true",
+        "observation.encoder.rgb.core_kwargs.pool_class=null",
+        "train.dataset_names=[insert_pin]"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "/opt/conda/envs/droid_env/bin/python"
+    },
+    {
+      "name": "train_rlds + MVP backbone (Hydra)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robomimic.scripts.train_rlds",
+      "args": [
+        "debug=true",
+        "observation.encoder.rgb.core_kwargs.backbone_class=MVPConv",
+        "observation.encoder.rgb.core_kwargs.feature_dimension=512",
+        "observation.encoder.rgb.core_kwargs.flatten=true",
+        "observation.encoder.rgb.core_kwargs.backbone_kwargs.mvp_model_class=vitb-mae-egosoup",
+        "observation.encoder.rgb.core_kwargs.backbone_kwargs.freeze=true",
+        "observation.encoder.rgb.core_kwargs.pool_class=null",
+        "train.dataset_names=[insert_pin]"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "/opt/conda/envs/droid_env/bin/python"
+    },
+    {
+      "name": "torchrun DDP (train_ddp)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "torch.distributed.run",
+      "args": [
+        "--nproc_per_node=4",
+        "-m", "robomimic.scripts.train_ddp",
+        "debug=true",
+        "train.dataset_names=[insert_pin]"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "/opt/conda/envs/droid_env/bin/python"
+    }
+  ]
+}

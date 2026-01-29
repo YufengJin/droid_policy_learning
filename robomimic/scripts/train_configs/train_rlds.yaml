@@ -318,6 +318,7 @@ observation:
 
   # 观察编码器配置
   # 定义如何编码不同类型的观察
+  # 更换 visual encoder 详见: docs/obs_encoder_visual_backbone.md
   encoder:
     # 低维观察编码器（通常不需要编码器，直接使用）
     low_dim:
@@ -328,17 +329,18 @@ observation:
 
     # RGB 图像编码器配置
     rgb:
-      core_class: VisualCore     # 视觉编码器核心类
+      core_class: VisualCore     # 视觉编码器核心类（保持 VisualCore，骨干在 backbone_class 中指定）
       fuser: null               # 多相机融合器（null 表示不融合）
       core_kwargs:
         feature_dimension: 512   # 输出特征维度
         flatten: true            # 是否展平特征
+        # 可选 backbone_class: ResNet18Conv（轻量）, ResNet50Conv, R3MConv（预训练）, MVPConv（预训练）
         backbone_class: ResNet50Conv  # 骨干网络：ResNet50 卷积网络
         backbone_kwargs:
           pretrained: true       # 是否使用预训练权重
           use_cam: false         # 是否使用相机参数
           downsample: false      # 是否下采样
-        pool_class: null        # 池化层类
+        pool_class: null        # 池化层类（ResNet 可用 SpatialSoftmax；R3M/MVP 通常 null）
         pool_kwargs: null
       # 观察随机化器（数据增强）
       obs_randomizer_class:
