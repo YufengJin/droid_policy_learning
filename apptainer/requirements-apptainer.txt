@@ -1,0 +1,37 @@
+# Droid + Octo pip dependencies (torch/jax installed separately with CUDA)
+numpy==1.24.3
+h5py
+psutil
+tqdm
+termcolor
+tensorboard
+tensorboardX
+imageio
+imageio-ffmpeg
+matplotlib
+diffusers==0.11.1
+opencv-python
+transformers==4.34.0
+cmake
+gym
+ml_dtypes==0.2.0
+chex==0.1.85
+optax==0.1.5
+tensorflow_probability==0.23.0
+tensorflow==2.15.0
+distrax==0.1.5
+flax==0.7.5
+ml_collections
+absl-py
+scipy
+wandb
+einops
+moviepy
+pre-commit==3.3.3
+tensorflow_hub
+tensorflow_text
+tensorflow_datasets==4.9.2
+tensorflow_graphics==2021.12.3
+plotly
+hydra-core>=1.1.0
+# egl_probe installed separately with --no-build-isolation

@@ -1,29 +1,24 @@
 """
 DROID DDP (Distributed Data Parallel) training entry point.
 
-支持 RLDS + HDF5 双格式。通过 Hydra 从 train_configs/train_rlds.yaml 读取配置；启动方式使用 torchrun。
-（原 train_ddp.py，重命名为 train_droid.py 以区分不同数据集的训练脚本。）
+支持 RLDS + HDF5 双格式。通过 Hydra 从 train_configs/train_rlds.yaml 读取配置，使用 torchrun 启动。
 
 Usage:
-  # 多卡:
+  # 多卡训练:
   torchrun --nproc_per_node=4 -m robomimic.scripts.train_droid
 
   # 带覆盖:
-  torchrun --nproc_per_node=4 -m robomimic.scripts.train_droid \
+  torchrun --nproc_per_node=4 -m robomimic.scripts.train_droid \\
       train.data_path=/workspace/dataset train.dataset_names=[insert_pin] experiment.name=my_exp
 
-  # 可选 load_from（会替换为 JSON 配置）:
-  torchrun --nproc_per_node=4 -m robomimic.scripts.train_droid load_from=/path/to/generated.json
-
-  # 单卡（不设 RANK 时退化为单进程，仍用 Hydra + train_configs）:
+  # 单卡:
   python -m robomimic.scripts.train_droid
 
-Config 始终通过 Hydra 从 robomimic/scripts/train_configs 读取；运行用 torchrun。
+  # 从 JSON 配置启动:
+  torchrun --nproc_per_node=4 -m robomimic.scripts.train_droid load_from=/path/to/generated.json
 
-正确退出与端口（MASTER_PORT，默认 29500）:
-  - 脚本正常结束或按 Ctrl+C：会调用 cleanup_ddp()，进程退出后端口自动释放，无需手动关端口。
-  - 若用调试器点「Stop」只杀主进程、子进程未退出，端口可能仍被占：可先 pkill -f train_droid 或换端口
-    MASTER_PORT=29501 torchrun ...
+Config 通过 Hydra 从 robomimic/scripts/train_configs/train_rlds.yaml 读取。
+Ctrl+C 会 cleanup DDP 并释放 MASTER_PORT（默认 29500）；端口占用时可改用 MASTER_PORT=29501。
 """
 
 import json
@@ -173,7 +168,8 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
     torch.set_num_threads(1)
 
     is_main = rank == 0
-    log_dir, ckpt_dir, video_dir, vis_dir = TrainUtils.get_exp_dir(config)
+    # prompt_on_exists=False: never block on input() when exp dir exists (slurm/container-safe)
+    log_dir, ckpt_dir, video_dir, vis_dir = TrainUtils.get_exp_dir(config, prompt_on_exists=False)
 
     if is_main and config.experiment.logging.terminal_output_to_txt:
         logger = PrintLogger(os.path.join(log_dir, "log.txt"))
@@ -373,13 +369,37 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
         device=device,
     )
 
+    train_num_steps = config.experiment.epoch_every_n_steps
+    valid_num_steps = config.experiment.validation_epoch_every_n_steps
+    best_valid_loss = None
+    best_return = {k: -np.inf for k in envs} if config.experiment.rollout.enabled else None
+    best_success_rate = {k: -1.0 for k in envs} if config.experiment.rollout.enabled else None
+    last_ckpt_time = time.time()
+    start_epoch = 1
+
     ckpt_path = config.experiment.ckpt_path
+    resume = getattr(config.experiment, "resume", False)
     if ckpt_path is not None:
         if is_main:
             print("LOADING MODEL WEIGHTS FROM " + ckpt_path)
         from robomimic.utils.file_utils import maybe_dict_from_checkpoint
         ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
+        # Load into unwrapped algo; DDP wrap happens below so no .module here
         model.deserialize(ckpt_dict["model"])
+        if resume and "epoch" in ckpt_dict and "optimizer" in ckpt_dict:
+            if is_main:
+                print("RESUMING: loading optimizer, scheduler, epoch from checkpoint")
+            TrainUtils._load_optimizer_state(model.optimizers, ckpt_dict["optimizer"])
+            TrainUtils._load_scheduler_state(model.lr_schedulers, ckpt_dict["lr_scheduler"])
+            start_epoch = ckpt_dict["epoch"] + 1
+            if "best_valid_loss" in ckpt_dict:
+                best_valid_loss = ckpt_dict["best_valid_loss"]
+            if "best_return" in ckpt_dict:
+                best_return = ckpt_dict["best_return"]
+            if "best_success_rate" in ckpt_dict:
+                best_success_rate = ckpt_dict["best_success_rate"]
+            if is_main:
+                print("RESUME: starting from epoch {}".format(start_epoch))
 
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
@@ -390,14 +410,7 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
         print("")
         flush_warnings()
 
-    train_num_steps = config.experiment.epoch_every_n_steps
-    valid_num_steps = config.experiment.validation_epoch_every_n_steps
-    best_valid_loss = None
-    best_return = {k: -np.inf for k in envs} if config.experiment.rollout.enabled else None
-    best_success_rate = {k: -1.0 for k in envs} if config.experiment.rollout.enabled else None
-    last_ckpt_time = time.time()
-
-    for epoch in range(1, config.train.num_epochs + 1):
+    for epoch in range(start_epoch, config.train.num_epochs + 1):
         if use_ddp and hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
         step_log, data_loader_iter = TrainUtils.run_epoch(
@@ -562,15 +575,21 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
                     pass
 
         if should_save_ckpt and is_main:
-            save_model = unwrapped
+            # DDP: save unwrapped algo (model.module), not the DDP wrapper
+            # Include optimizer, scheduler, epoch for full resume support
+            model_to_save = unwrapped
             TrainUtils.save_model(
-                model=save_model,
+                model=model_to_save,
                 config=config,
                 env_meta=env_meta,
                 shape_meta=shape_meta,
                 ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
                 obs_normalization_stats=obs_normalization_stats,
                 action_normalization_stats=action_normalization_stats,
+                epoch=epoch,
+                best_valid_loss=best_valid_loss,
+                best_return=best_return,
+                best_success_rate=best_success_rate,
             )
 
         if is_main:

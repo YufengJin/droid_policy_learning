@@ -10,43 +10,46 @@
 #SBATCH --partition=a100             # 分区名称 (例如 a100, a40, tiny_gpu 等)
 
 # -----------------------------------------------------------------------
-# 1. 配置路径变量
+# 1. 配置路径变量（与 run_container.sh 一致，支持环境变量覆盖）
 # -----------------------------------------------------------------------
-# 镜像位置 (建议放绝对路径，或者放在 $WORK 下)
-CONTAINER_IMAGE="./droid_policy.sif"
+CONTAINER_IMAGE="${APPTAINER_IMAGE:-./droid_policy.sif}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# 宿主机路径 (Host Paths)
-HOST_CODE_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning"
-HOST_DATA_DIR="/home/atuin/g108ea/g108ea10/datasets/droid"
+# 宿主机路径
+HOST_CODE_DIR="${DROID_PROJECT_DIR:-$PROJECT_ROOT}"
+HOST_DROID_DATA="${DROID_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/droid}"
+HOST_ROBOCASA_DATA="${ROBOCASA_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/robocasa}"
+HOST_HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}"
+# 宿主机 TMPDIR 映射到容器 /tmp，避免容器 overlay 空间不足
+HOST_TMPDIR="${TMPDIR:-/tmp}"
 
-# 容器内路径 (Container Paths)
+# 容器内路径
 CONT_CODE_DIR="/workspace/droid_policy_learning"
-CONT_DATA_DIR="/workspace/datasets/droid"
+CONT_DROID="/workspace/datasets/droid"
+CONT_ROBOCASA="/workspace/datasets/robocasa"
+CONT_HF="/root/.cache/huggingface"
 
 # -----------------------------------------------------------------------
-# 2. 准备 Apptainer 参数
+# 2. 准备 Apptainer Bind 参数
 # -----------------------------------------------------------------------
-# 缓存设置 (根据文档建议 [cite: 73]，指向 $WORK 防止爆 $HOME)
-export APPTAINER_CACHEDIR=$WORK/.apptainer_cache
+export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-${WORK:-$HOME}/.apptainer_cache}"
 
-# 构造挂载参数 (-B src:dst)
-# 注意：多个挂载点用逗号分隔，或者写多个 -B
-BIND_ARGS="-B ${HOST_CODE_DIR}:${CONT_CODE_DIR} -B ${HOST_DATA_DIR}:${CONT_DATA_DIR}"
+BIND_ARGS="-B ${HOST_CODE_DIR}:${CONT_CODE_DIR}"
+BIND_ARGS="$BIND_ARGS -B ${HOST_TMPDIR}:/tmp"
+[ -d "$HOST_DROID_DATA" ]    && BIND_ARGS="$BIND_ARGS -B ${HOST_DROID_DATA}:${CONT_DROID}:ro"
+[ -d "$HOST_ROBOCASA_DATA" ] && BIND_ARGS="$BIND_ARGS -B ${HOST_ROBOCASA_DATA}:${CONT_ROBOCASA}:ro"
+[ -d "$HOST_HF_CACHE" ]      && BIND_ARGS="$BIND_ARGS -B ${HOST_HF_CACHE}:${CONT_HF}"
 
-# 打印调试信息
 echo "Job running on node: $(hostname)"
-echo "Using Container: $CONTAINER_IMAGE"
-echo "Binding Code: $HOST_CODE_DIR -> $CONT_CODE_DIR"
-echo "Binding Data: $HOST_DATA_DIR -> $CONT_DATA_DIR"
+echo "Binding: $HOST_CODE_DIR -> $CONT_CODE_DIR"
+echo "Binding: $HOST_TMPDIR -> /tmp (TMPDIR)"
+[ -d "$HOST_DROID_DATA" ]    && echo "Binding: $HOST_DROID_DATA -> $CONT_DROID (ro)"
+[ -d "$HOST_ROBOCASA_DATA" ] && echo "Binding: $HOST_ROBOCASA_DATA -> $CONT_ROBOCASA (ro)"
 
 # -----------------------------------------------------------------------
 # 3. 执行任务
 # -----------------------------------------------------------------------
-# --nv: 启用 NVIDIA GPU 支持 [cite: 61, 67]
-# -C (--contain): 隔离宿主机环境，防止 /home 配置污染 
-# --pwd: 设置工作目录，避免工作目录警告
-# exec: 执行具体命令 (比 run 更灵活)
-
 WORK_DIR="/workspace/droid_policy_learning"
 
 srun apptainer exec --nv -C --pwd "$WORK_DIR" $BIND_ARGS $CONTAINER_IMAGE \

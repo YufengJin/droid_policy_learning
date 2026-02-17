@@ -69,7 +69,8 @@ experiment:
 
   env: null
   additional_envs: null
-  ckpt_path: null   # 设为已有 .pth 可加载权重；配合顶层 resume=true 可继续训练
+  ckpt_path: null   # 设为已有 .pth 可加载权重
+  resume: false     # true=完整恢复(optimizer+scheduler+epoch)；false=仅加载权重(微调)
   env_meta_update_dict: {}
 
   render: false
@@ -92,7 +93,7 @@ train:
   # RoboCasa HDF5 数据集路径列表
   # 每个条目包含 path（HDF5 文件路径）和可选的 weight（采样权重）
   data:
-    - path: /workspace/datasets/robocasa/demo.hdf5
+    - path: /workspace/datasets/robocasa/v0.1/multi_stage
       weight: 1.0
 
   data_format: robomimic  # HDF5 格式（robomimic 标准）
@@ -197,10 +198,10 @@ observation:
 
   modalities:
     obs:
-      low_dim:
-        - robot0_eef_pos            # 末端执行器位置 (3D)
-        - robot0_eef_quat           # 末端执行器四元数 (4D)
-        - robot0_gripper_qpos       # 夹爪位置 (2D)
+      # low_dim:
+      #   - robot0_eef_pos            # 末端执行器位置 (3D)
+      #   - robot0_eef_quat           # 末端执行器四元数 (4D)
+      #   - robot0_gripper_qpos       # 夹爪位置 (2D)
       rgb:
         # ------------------------------------------------------------------
         # RGB 图像输入：支持 1~3 张图片，按需取消注释即可

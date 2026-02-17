@@ -33,7 +33,7 @@ import os
 import pickle
 import numpy as np
 import h5py
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from copy import deepcopy
 
 import torch
@@ -166,6 +166,7 @@ class RoboCasaDataset(torch.utils.data.Dataset):
         filter_key=None,
         image_size=None,
         normalize_actions=True,
+        verbose=False,
     ):
         """
         Args:
@@ -180,10 +181,12 @@ class RoboCasaDataset(torch.utils.data.Dataset):
             filter_key (str | None): "train" or "valid" to select demos via HDF5 filter keys.
             image_size (tuple | None): If provided, (H, W) to resize images.
             normalize_actions (bool): Whether to normalise actions to [-1, 1].
+            verbose (bool): If True, print debug info (HDF5 files, first demo structure).
         """
         super().__init__()
 
         self.data_dir = data_dir
+        self.verbose = verbose
         self.obs_keys = list(obs_keys)
         self.action_keys = list(action_keys)
         self.seq_length = seq_length
@@ -198,6 +201,17 @@ class RoboCasaDataset(torch.utils.data.Dataset):
         # Discover HDF5 files
         # ------------------------------------------------------------------
         hdf5_files = get_hdf5_files(data_dir)
+        # 同一目录下若有 demo.hdf5（原始）和 demo_im128.hdf5（含 obs），仅用 demo_im128
+        by_dir = defaultdict(list)
+        for f in hdf5_files:
+            by_dir[os.path.dirname(f)].append(f)
+        filtered = []
+        for d, flist in by_dir.items():
+            im128 = [p for p in flist if "_im128" in os.path.basename(p)]
+            filtered.extend(im128 if im128 else flist)
+        hdf5_files = sorted(filtered)
+        if self.verbose:
+            print("[RoboCasaDataset] data_dir={}, hdf5_files={}".format(data_dir, hdf5_files))
         if len(hdf5_files) == 0:
             # Maybe data_dir IS the hdf5 file
             if os.path.isfile(data_dir) and data_dir.lower().endswith((".h5", ".hdf5")):
@@ -235,8 +249,23 @@ class RoboCasaDataset(torch.utils.data.Dataset):
 
                 for dk in demo_keys:
                     demo_group = f["data/{}".format(dk)]
-                    obs_group = demo_group["obs"]
+                    # obs / observations: RoboCasa v0.1 用 obs；部分格式用 observations；原始 collect 无此 group
+                    if "obs" in demo_group:
+                        obs_group = demo_group["obs"]
+                    elif "observations" in demo_group:
+                        obs_group = demo_group["observations"]
+                    else:
+                        if self.verbose:
+                            print("[RoboCasaDataset] data/{} keys: {}".format(dk, list(demo_group.keys())))
+                        avail = list(demo_group.keys())
+                        raise KeyError(
+                            "data/{} 中缺少 'obs' 或 'observations'。当前 keys: {}. "
+                            "若为 RoboCasa 原始 collect（无图像/obs），需先运行 dataset_states_to_obs.py 提取观测："
+                            " OMP_NUM_THREADS=1 python robocasa/scripts/dataset_states_to_obs.py --dataset <path>".format(dk, avail)
+                        )
 
+                    if self.verbose and demo_idx == 0:
+                        print("[RoboCasaDataset] data/{} obs_group keys: {}".format(dk, list(obs_group.keys())))
                     # robot_states: optional. RoboCasa v0.1 has eef_pos, eef_quat, gripper_qpos directly in obs.
                     robot_states = None
                     if "robot_states" in demo_group:
@@ -321,6 +350,9 @@ class RoboCasaDataset(torch.utils.data.Dataset):
 
         if len(self.demos) == 0:
             raise RuntimeError("No demonstrations loaded from {}".format(data_dir))
+        if self.verbose:
+            print("[RoboCasaDataset] loaded {} demos, total_samples={}".format(
+                len(self.demos), sum(self.demo_lengths)))
 
         # ------------------------------------------------------------------
         # Compute / load normalisation statistics

@@ -134,6 +134,9 @@ class BaseConfig(Config):
 
         # whether to load in a previously trained model checkpoint
         self.experiment.ckpt_path = None
+        # when True and ckpt_path is set: load model + optimizer + scheduler + epoch for full resume
+        # when False: only load model weights (e.g. for fine-tuning from pretrained)
+        self.experiment.resume = False
 
     def train_config(self):
         """

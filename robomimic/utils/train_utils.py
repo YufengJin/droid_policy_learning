@@ -27,7 +27,7 @@ from robomimic.envs.wrappers import EnvWrapper
 from robomimic.algo import RolloutPolicy
 
 
-def get_exp_dir(config, auto_remove_exp_dir=False):
+def get_exp_dir(config, auto_remove_exp_dir=False, prompt_on_exists=None):
     """
     Create experiment directory from config. If an identical experiment directory
     exists and @auto_remove_exp_dir is False (default), the function will prompt 
@@ -37,6 +37,8 @@ def get_exp_dir(config, auto_remove_exp_dir=False):
     Args:
         auto_remove_exp_dir (bool): if True, automatically remove the existing experiment
             folder if it exists at the same path.
+        prompt_on_exists (bool or None): if False, never prompt when dir exists - keep it
+            and add new timestamp subdir (non-interactive/slurm-safe). Default None.
     
     Returns:
         log_dir (str): path to created log directory (sub-folder in experiment directory)
@@ -56,31 +58,36 @@ def get_exp_dir(config, auto_remove_exp_dir=False):
         base_output_dir = os.path.join(robomimic.__path__[0], base_output_dir)
     base_output_dir = os.path.join(base_output_dir, config.experiment.name)
     if os.path.exists(base_output_dir):
-        if not auto_remove_exp_dir:
-            ans = input("WARNING: model directory ({}) already exists! \noverwrite? (y/n)\n".format(base_output_dir))
-        else:
+        if prompt_on_exists is False:
+            # Non-interactive: keep existing dir, add new timestamp subdir (no prompt)
+            pass
+        elif auto_remove_exp_dir:
             ans = "y"
-        if ans == "y":
             print("REMOVING")
             shutil.rmtree(base_output_dir)
+        else:
+            ans = input("WARNING: model directory ({}) already exists! \noverwrite? (y/n)\n".format(base_output_dir))
+            if ans == "y":
+                print("REMOVING")
+                shutil.rmtree(base_output_dir)
 
     # only make model directory if model saving is enabled
     output_dir = None
     if config.experiment.save.enabled:
         output_dir = os.path.join(base_output_dir, time_str, "models")
-        os.makedirs(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
 
     # tensorboard directory
     log_dir = os.path.join(base_output_dir, time_str, "logs")
-    os.makedirs(log_dir)
+    os.makedirs(log_dir, exist_ok=True)
 
     # video directory
     video_dir = os.path.join(base_output_dir, time_str, "videos")
-    os.makedirs(video_dir)
+    os.makedirs(video_dir, exist_ok=True)
 
     # vis directory
     vis_dir = os.path.join(base_output_dir, time_str, "vis")
-    os.makedirs(vis_dir)
+    os.makedirs(vis_dir, exist_ok=True)
     
     return log_dir, output_dir, video_dir, vis_dir
 
@@ -537,9 +544,68 @@ def should_save_from_rollout_logs(
     )
 
 
-def save_model(model, config, env_meta, shape_meta, ckpt_path, obs_normalization_stats=None, action_normalization_stats=None):
+def _serialize_optimizer_state(optimizers):
+    """Serialize optimizer(s) for checkpoint. Handles both single optimizer and list."""
+    out = {}
+    for k, v in optimizers.items():
+        if isinstance(v, (list, tuple)):
+            out[k] = [opt.state_dict() for opt in v]
+        else:
+            out[k] = v.state_dict()
+    return out
+
+
+def _serialize_scheduler_state(lr_schedulers):
+    """Serialize lr_scheduler(s) for checkpoint."""
+    out = {}
+    for k, v in lr_schedulers.items():
+        if v is None:
+            out[k] = None
+        elif isinstance(v, (list, tuple)):
+            out[k] = [sched.state_dict() if sched is not None else None for sched in v]
+        else:
+            out[k] = v.state_dict()
+    return out
+
+
+def _load_optimizer_state(optimizers, state_dict):
+    """Restore optimizer state from checkpoint."""
+    for k in state_dict:
+        if k not in optimizers:
+            continue
+        v = optimizers[k]
+        sd = state_dict[k]
+        if isinstance(v, (list, tuple)):
+            for opt, s in zip(v, sd):
+                if s is not None:
+                    opt.load_state_dict(s)
+        else:
+            if sd is not None:
+                v.load_state_dict(sd)
+
+
+def _load_scheduler_state(lr_schedulers, state_dict):
+    """Restore lr_scheduler state from checkpoint."""
+    for k in state_dict:
+        if k not in lr_schedulers:
+            continue
+        v = lr_schedulers[k]
+        sd = state_dict[k]
+        if v is None:
+            continue
+        if isinstance(v, (list, tuple)):
+            for sched, s in zip(v, sd):
+                if sched is not None and s is not None:
+                    sched.load_state_dict(s)
+        else:
+            if sd is not None:
+                v.load_state_dict(sd)
+
+
+def save_model(model, config, env_meta, shape_meta, ckpt_path, obs_normalization_stats=None, action_normalization_stats=None,
+              epoch=None, best_valid_loss=None, best_return=None, best_success_rate=None):
     """
-    Save model to a torch pth file.
+    Save model to a torch pth file. Optionally include training state for full resume.
 
     Args:
         model (Algo instance): model to save
@@ -558,6 +624,11 @@ def save_model(model, config, env_meta, shape_meta, ckpt_path, obs_normalization
             shape for the observation.
 
         action_normalization_stats (dict): TODO
+
+        epoch (int): current epoch (for resume). If provided with optimizer/scheduler, enables full resume.
+        best_valid_loss (float): best validation loss so far
+        best_return (dict): best rollout return per env
+        best_success_rate (dict): best rollout success rate per env
     """
     env_meta = deepcopy(env_meta)
     shape_meta = deepcopy(shape_meta)
@@ -575,6 +646,18 @@ def save_model(model, config, env_meta, shape_meta, ckpt_path, obs_normalization
     if action_normalization_stats is not None:
         action_normalization_stats = deepcopy(action_normalization_stats)
         params["action_normalization_stats"] = TensorUtils.to_list(action_normalization_stats)
+
+    if epoch is not None:
+        params["epoch"] = epoch
+        params["optimizer"] = _serialize_optimizer_state(model.optimizers)
+        params["lr_scheduler"] = _serialize_scheduler_state(model.lr_schedulers)
+        if best_valid_loss is not None:
+            params["best_valid_loss"] = best_valid_loss
+        if best_return is not None:
+            params["best_return"] = best_return
+        if best_success_rate is not None:
+            params["best_success_rate"] = best_success_rate
+
     torch.save(params, ckpt_path)
     print("save checkpoint to {}".format(ckpt_path))
 
@@ -604,11 +687,14 @@ def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_nor
     Returns:
         step_log_all (dict): dictionary of logged training metrics averaged across all batches
     """
+    # DDP does not forward custom methods (set_train, process_batch_for_training, etc.) to .module
+    unwrapped = getattr(model, "module", model)
+
     epoch_timestamp = time.time()
     if validate:
-        model.set_eval()
+        unwrapped.set_eval()
     else:
-        model.set_train()
+        unwrapped.set_train()
     # if num_steps is None:
     #     num_steps = len(data_loader)
 
@@ -635,18 +721,18 @@ def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_nor
 
         # process batch for training
         t = time.time()
-        input_batch = model.process_batch_for_training(batch)
-        input_batch = model.postprocess_batch_for_training(input_batch, obs_normalization_stats=obs_normalization_stats)
+        input_batch = unwrapped.process_batch_for_training(batch)
+        input_batch = unwrapped.postprocess_batch_for_training(input_batch, obs_normalization_stats=obs_normalization_stats)
         timing_stats["Process_Batch"].append(time.time() - t)
 
-        # forward and backward pass
+        # forward and backward pass (unwrapped is model.module when DDP; gradients still sync via DDP hooks)
         t = time.time()
-        info = model.train_on_batch(input_batch, epoch, validate=validate)
+        info = unwrapped.train_on_batch(input_batch, epoch, validate=validate)
         timing_stats["Train_Batch"].append(time.time() - t)
 
         # tensorboard logging
         t = time.time()
-        step_log = model.log_info(info)
+        step_log = unwrapped.log_info(info)
         step_log_all.append(step_log)
         timing_stats["Log_Info"].append(time.time() - t)
 

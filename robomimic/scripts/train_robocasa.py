@@ -1,92 +1,31 @@
 """
 RoboCasa DDP (Distributed Data Parallel) training entry point.
 
-使用 RoboCasaDataset 读取 RoboCasa HDF5 数据（robosuite 标准格式），支持：
-  - JPEG 压缩图像（*_jpeg）与原始 RGB
-  - 动作截断 12D -> 7D（仅用机械臂+夹爪，忽略 mobile base）
-  - 单一路径：一个目录（其下所有 .h5）或单个 .hdf5 文件
-  - train/val 分割：通过 HDF5 的 mask/train、mask/valid 与 train.hdf5_filter_key 控制
+使用 RoboCasaDataset 读取 RoboCasa HDF5 数据（robosuite 标准格式），支持 JPEG 压缩、动作截断等。
+path 可为单个 .h5 或目录（扫描目录下所有 HDF5）；train/val 由 HDF5 mask 与 train.hdf5_filter_key 控制。
 
-数据根目录（示例）：/workspace/datasets/robocasa/
-注意：当前仅使用 train.data 的第一个条目（config.train.data[0]）；多路径需改脚本。
+Usage:
+  # 多卡训练:
+  torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa
 
-配置来源：Hydra 从 robomimic/scripts/train_configs/train_robocasa.yaml 读取，支持命令行覆盖。
+  # 带覆盖:
+  torchrun --nproc_per_node=8 -m robomimic.scripts.train_robocasa \\
+      'train.data=[{path: /workspace/datasets/robocasa/}]' \\
+      train.batch_size=32 experiment.name=robocasa_diffusion
 
-=============================================================================
-单卡：如何训练 RoboCasa 数据（/workspace/datasets/robocasa/）
-=============================================================================
+  # 单卡:
+  python -m robomimic.scripts.train_robocasa
 
-1) 全部数据
-   - 使用目录路径，脚本会扫描该目录下所有 .h5/.hdf5 文件，并加载每个文件中的全部 demo。
-   - 若要做 train/valid 分割，需 HDF5 内带 mask/train、mask/valid，并保持默认 train.hdf5_filter_key=train。
-   - 若要不做分割、用「所有 demo」训练，设 train.hdf5_filter_key=null。
+  # Debug 模式:
+  python -m robomimic.scripts.train_robocasa debug=true
 
-   # 全部数据（目录下所有 .h5 + 所有 demo，不按 mask 分割）
-   python -m robomimic.scripts.train_robocasa \\
-       'train.data=[{path: /workspace/datasets/robocasa/}]' \\
-       train.hdf5_filter_key=null
+  # 从 JSON 配置启动:
+  torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa load_from=/path/to/config.json
 
-   # 全部数据（目录下所有 .h5，仅用 mask/train 的 demo 训练，mask/valid 做验证）
-   python -m robomimic.scripts.train_robocasa \\
-       'train.data=[{path: /workspace/datasets/robocasa/}]'
+  # 在 docker 中运行
+  docker exec -it -w /workspace/droid_policy_learning droid-dev-headless micromamba run -n droid_env python -m robomimic.scripts.train_robocasa
 
-2) 单个或多个 .h5
-   - 单个 .h5：path 直接指向该文件。
-   - 多个 .h5：path 指向包含这些文件的目录，脚本会扫描目录内所有 HDF5 并一起训练（仅支持一个 path，多文件请放在同一目录）。
-
-   # 单个 .h5 文件
-   python -m robomimic.scripts.train_robocasa \\
-       'train.data=[{path: /workspace/datasets/robocasa/demo.hdf5}]'
-
-   # 多个 .h5（放在同一目录，path 填该目录）
-   python -m robomimic.scripts.train_robocasa \\
-       'train.data=[{path: /workspace/datasets/robocasa/my_tasks/}]'
-
-=============================================================================
-详细 Run 说明（含多卡）
-=============================================================================
-
-1) 多卡 DDP 训练（默认使用 yaml 中的 train.data[0].path）:
-   torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa
-
-2) 指定数据路径与实验名（覆盖 yaml）:
-   torchrun --nproc_per_node=8 -m robomimic.scripts.train_robocasa \\
-       'train.data=[{path: /workspace/datasets/robocasa/demo.hdf5}]' \\
-       train.batch_size=32 experiment.name=robocasa_diffusion
-
-   - path 可以是单个 .h5/.hdf5 文件，也可以是目录（目录下所有 HDF5 会被扫描）。
-   - 仅 train.data 的第一项生效；多文件请放在同一目录或合并为一个 path。
-
-3) 训练「所有 demo」（不做 train/valid 分割）:
-   torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa \\
-       'train.data=[{path: /workspace/datasets/robocasa/demo.hdf5}]' \\
-       train.hdf5_filter_key=null
-
-   - 将 train.hdf5_filter_key 设为 null 后，不会按 HDF5 的 mask/train 过滤，会使用该 path 下全部 demo。
-   - 若同时需要验证集，请保证 HDF5 中有 mask/valid，或关闭 experiment.validate。
-
-4) 单卡训练:
-   python -m robomimic.scripts.train_robocasa
-
-5) Debug 模式（短 epoch、少 rollout、输出到 /tmp、关 wandb/tb）:
-   python -m robomimic.scripts.train_robocasa debug=true
-
-6) 从已导出的 JSON 完整配置启动（替代 yaml + 命令行覆盖）:
-   torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa \\
-       load_from=/path/to/config.json
-
-7) 常用覆盖示例:
-   # 改 batch_size、实验名、epoch 数
-   torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa \\
-       train.batch_size=64 experiment.name=my_exp train.num_epochs=200
-
-   # 关闭验证
-   torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa \\
-       experiment.validate=false
-
-   # 关闭 rollout
-   torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa \\
-       experiment.rollout.enabled=false
+Config 通过 Hydra 从 robomimic/scripts/train_configs/train_robocasa.yaml 读取。
 """
 
 import json
@@ -302,7 +241,8 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
     torch.set_num_threads(1)
 
     is_main = rank == 0
-    log_dir, ckpt_dir, video_dir, vis_dir = TrainUtils.get_exp_dir(config)
+    # prompt_on_exists=False: never block on input() when exp dir exists (slurm/container-safe)
+    log_dir, ckpt_dir, video_dir, vis_dir = TrainUtils.get_exp_dir(config, prompt_on_exists=False)
 
     if is_main and config.experiment.logging.terminal_output_to_txt:
         logger = PrintLogger(os.path.join(log_dir, "log.txt"))
@@ -360,6 +300,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         filter_key=config.train.hdf5_filter_key,
         image_size=image_size,
         normalize_actions=True,
+        verbose=debug,
     )
 
     # 验证集：同一 data_dir，用 mask/valid 的 demo（需 HDF5 内有 valid mask）
@@ -379,6 +320,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                 filter_key=hdf5_validation_filter_key,
                 image_size=image_size,
                 normalize_actions=True,
+                verbose=debug,
             )
         except Exception as e:
             if is_main:
@@ -524,15 +466,39 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         ac_dim=shape_meta["ac_dim"],
         device=device,
     )
-    # 可选：从 checkpoint 恢复权重（如微调）
+
+    train_num_steps = config.experiment.epoch_every_n_steps
+    valid_num_steps = config.experiment.validation_epoch_every_n_steps
+    best_valid_loss = None
+    best_return = {k: -np.inf for k in envs} if config.experiment.rollout.enabled else None
+    best_success_rate = {k: -1.0 for k in envs} if config.experiment.rollout.enabled else None
+    last_ckpt_time = time.time()
+    data_loader_iter = None
+    start_epoch = 1
 
     ckpt_path = config.experiment.ckpt_path
+    resume = getattr(config.experiment, "resume", False)
     if ckpt_path is not None:
         if is_main:
             print("LOADING MODEL WEIGHTS FROM " + ckpt_path)
         from robomimic.utils.file_utils import maybe_dict_from_checkpoint
         ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
+        # Load into unwrapped algo; DDP wrap happens below
         model.deserialize(ckpt_dict["model"])
+        if resume and "epoch" in ckpt_dict and "optimizer" in ckpt_dict:
+            if is_main:
+                print("RESUMING: loading optimizer, scheduler, epoch from checkpoint")
+            TrainUtils._load_optimizer_state(model.optimizers, ckpt_dict["optimizer"])
+            TrainUtils._load_scheduler_state(model.lr_schedulers, ckpt_dict["lr_scheduler"])
+            start_epoch = ckpt_dict["epoch"] + 1
+            if "best_valid_loss" in ckpt_dict:
+                best_valid_loss = ckpt_dict["best_valid_loss"]
+            if "best_return" in ckpt_dict:
+                best_return = ckpt_dict["best_return"]
+            if "best_success_rate" in ckpt_dict:
+                best_success_rate = ckpt_dict["best_success_rate"]
+            if is_main:
+                print("RESUME: starting from epoch {}".format(start_epoch))
 
     # DDP 包装，多卡时梯度同步
     if use_ddp:
@@ -547,15 +513,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
     # -----------------------------------------------------------------------
     # 训练循环：每 epoch 跑 train / valid / 可选 rollout / MSE / 保存
     # -----------------------------------------------------------------------
-    train_num_steps = config.experiment.epoch_every_n_steps
-    valid_num_steps = config.experiment.validation_epoch_every_n_steps
-    best_valid_loss = None
-    best_return = {k: -np.inf for k in envs} if config.experiment.rollout.enabled else None
-    best_success_rate = {k: -1.0 for k in envs} if config.experiment.rollout.enabled else None
-    last_ckpt_time = time.time()
-    data_loader_iter = None
-
-    for epoch in range(1, config.train.num_epochs + 1):
+    for epoch in range(start_epoch, config.train.num_epochs + 1):
         # DDP：每 epoch 重置 sampler 的 epoch，保证各 rank 打乱顺序不同且可复现
         if use_ddp and hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
@@ -738,18 +696,22 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                     pass
 
         # -------------------------------------------------------------------
-        # 写 checkpoint（rank 0）
+        # 写 checkpoint（rank 0），含 optimizer/scheduler/epoch 供 resume
         # -------------------------------------------------------------------
         if should_save_ckpt and is_main:
-            save_model = unwrapped
+            model_to_save = unwrapped
             TrainUtils.save_model(
-                model=save_model,
+                model=model_to_save,
                 config=config,
                 env_meta=env_meta,
                 shape_meta=shape_meta,
                 ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
                 obs_normalization_stats=obs_normalization_stats,
                 action_normalization_stats=action_normalization_stats,
+                epoch=epoch,
+                best_valid_loss=best_valid_loss,
+                best_return=best_return,
+                best_success_rate=best_success_rate,
             )
 
         # -------------------------------------------------------------------

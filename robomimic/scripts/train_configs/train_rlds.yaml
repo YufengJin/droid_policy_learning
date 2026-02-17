@@ -91,8 +91,9 @@ experiment:
                             # 在 train.py:234-235 中使用: env_meta["env_name"] = config.experiment.env
   additional_envs: null     # 额外的评估环境列表（用于 rollout）
                             # 在 train.py:244-246 中使用，添加到 env_names 列表
-  ckpt_path: null          # 检查点路径（用于从检查点恢复训练）
-                           # 在 train.py:282-287 中加载模型权重
+  ckpt_path: null          # 检查点路径（用于加载/恢复训练）
+  resume: false            # 当 ckpt_path 设置时：true=完整恢复(model+optimizer+scheduler+epoch)
+                           # false=仅加载模型权重（如微调）。resume 需 checkpoint 内含 optimizer/scheduler/epoch
   env_meta_update_dict: {} # 环境元数据更新字典
                            # 在 train.py:192 中使用 deep_update(env_meta, ...) 更新环境元数据
 

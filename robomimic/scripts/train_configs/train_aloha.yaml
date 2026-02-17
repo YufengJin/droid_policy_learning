@@ -57,7 +57,8 @@ experiment:
 
   env: null
   additional_envs: null
-  ckpt_path: null
+  ckpt_path: null   # 设为已有 .pth 可加载权重
+  resume: false     # true=完整恢复(optimizer+scheduler+epoch)；false=仅加载权重(微调)
   env_meta_update_dict: {}
 
   render: false
