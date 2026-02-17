@@ -89,10 +89,16 @@ def obs_encoder_kwargs_from_config(obs_encoder_config):
     Returns:
         dict: Processed encoder kwargs
     """
+    # Non-modality keys that should be passed through without processing
+    _NON_MODALITY_KEYS = {"combine"}
+
     # Loop over each obs modality
     # Unlock encoder config
     obs_encoder_config.unlock()
     for obs_modality, encoder_kwargs in obs_encoder_config.items():
+        if obs_modality in _NON_MODALITY_KEYS:
+            continue
+
         ###  TODO: fix sanity checks. Disabling this code snippet to allow chaining multiple randomizers.
         # # First run some sanity checks and store the classes
         # for cls_name, cores in zip(("core", "obs_randomizer"), (OBS_ENCODER_CORES, OBS_RANDOMIZERS)):
@@ -1000,6 +1006,22 @@ class LowDimModality(Modality):
     Modality for low dimensional observations
     """
     name = "low_dim"
+
+    @classmethod
+    def _default_obs_processor(cls, obs):
+        return obs
+
+    @classmethod
+    def _default_obs_unprocessor(cls, obs):
+        return obs
+
+
+class LangModality(Modality):
+    """
+    Modality for precomputed language embeddings (e.g. DistilBERT 768-d).
+    Pass-through; no processing.
+    """
+    name = "lang"
 
     @classmethod
     def _default_obs_processor(cls, obs):

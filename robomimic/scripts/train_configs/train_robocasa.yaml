@@ -1,0 +1,286 @@
+# ============================================================================
+# Hydra 配置文件：RoboCasa HDF5 数据格式训练配置 (robomimic data_format)
+# ============================================================================
+# 使用方法：
+#   1. 多卡 DDP 训练:
+#      torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa
+#   2. 带覆盖:
+#      torchrun --nproc_per_node=8 -m robomimic.scripts.train_robocasa \
+#          'train.data=[{path: /workspace/datasets/robocasa/demo.hdf5}]' \
+#          train.batch_size=32 experiment.name=robocasa_diffusion
+#   3. 加载 JSON 配置:
+#      torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa \
+#          load_from=/path/to/generated.json
+#   4. 单卡训练:
+#      python -m robomimic.scripts.train_robocasa
+#   5. Debug 模式:
+#      python -m robomimic.scripts.train_robocasa debug=true
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Hydra 特定配置项（不会传递给 robomimic config）
+# ----------------------------------------------------------------------------
+load_from: null  # 可选：从 JSON 文件加载完整配置（会替换此 YAML）
+
+debug: false     # Debug 模式：快速迭代测试
+                 #   - epoch_every_n_steps = 3
+                 #   - num_epochs = 200
+                 #   - output_dir = /tmp/tmp_trained_models
+                 #   - 关闭 wandb/tb 日志
+resume: false    # 仅 Hydra 开关：true 时从 experiment.ckpt_path 恢复完整训练状态
+
+# ----------------------------------------------------------------------------
+# 算法配置
+# ----------------------------------------------------------------------------
+algo_name: diffusion_policy  # 支持: bc, bc_rnn, bc_transformer, diffusion_policy, ...
+
+# ----------------------------------------------------------------------------
+# 实验配置 (experiment)
+# ----------------------------------------------------------------------------
+experiment:
+  name: null  # 自动生成：{algo_name}_{dataset_basename}_{timestamp}
+
+  validate: true  # RoboCasa HDF5 支持 train/val 分割
+
+  logging:
+    terminal_output_to_txt: true
+    log_tb: true
+    log_wandb: true
+    wandb_proj_name: diffusion_policy_robocasa
+
+  mse:
+    enabled: true
+    every_n_epochs: 10
+    on_save_ckpt: true
+    num_samples: 6
+    visualize: true
+
+  save:
+    enabled: true
+    every_n_seconds: null
+    every_n_epochs: 50
+    epochs: []
+    on_best_validation: true
+    on_best_rollout_return: false
+    on_best_rollout_success_rate: true
+
+  epoch_every_n_steps: 100
+  validation_epoch_every_n_steps: 10
+
+  env: null
+  additional_envs: null
+  ckpt_path: null   # 设为已有 .pth 可加载权重；配合顶层 resume=true 可继续训练
+  env_meta_update_dict: {}
+
+  render: false
+  render_video: true
+  keep_all_videos: false
+  video_skip: 5
+
+  rollout:
+    enabled: false
+    n: 50
+    horizon: 400
+    rate: 50
+    warmstart: 0
+    terminate_on_success: true
+
+# ----------------------------------------------------------------------------
+# 训练配置 (train)
+# ----------------------------------------------------------------------------
+train:
+  # RoboCasa HDF5 数据集路径列表
+  # 每个条目包含 path（HDF5 文件路径）和可选的 weight（采样权重）
+  data:
+    - path: /workspace/datasets/robocasa/demo.hdf5
+      weight: 1.0
+
+  data_format: robomimic  # HDF5 格式（robomimic 标准）
+
+  output_dir: /workspace/droid_policy_learning/outputs
+
+  # HDF5 数据集参数
+  hdf5_filter_key: train         # HDF5 filter key（用于 train/val 分割）
+  hdf5_validation_filter_key: valid  # 验证集 filter key
+  hdf5_cache_mode: low_dim       # 缓存模式: null, "all", "low_dim"
+                                  # "low_dim" 仅缓存低维数据，减少内存占用
+  hdf5_use_swmr: true            # 使用 SWMR (Single Writer Multiple Reader) 模式
+  hdf5_normalize_obs: false      # 是否归一化观察值
+  hdf5_load_next_obs: true       # 是否加载下一步观察值
+  num_data_workers: 4            # DataLoader worker 数量
+
+  # 序列配置
+  seq_length: 15
+  pad_seq_length: true
+  frame_stack: 2
+  pad_frame_stack: true
+
+  # 通用数据配置
+  dataset_keys:
+    - actions
+  goal_mode: null
+  truncated_geom_factor: 0.3
+
+  # 训练超参数
+  cuda: true
+  batch_size: 64              # 每 GPU 的 batch size
+                               # 有效 batch_size = batch_size * nproc_per_node
+  num_epochs: 100000
+  seed: 1
+
+  # RoboCasa 动作配置
+  # 标准 robosuite/robocasa 动作空间：7D (3D pos + 3D rot + 1D gripper)
+  action_keys:
+    - actions
+
+  action_shapes:
+    - [1, 7]                   # actions: (batch, 7)
+
+  action_config:
+    actions: {normalization: min_max}
+
+  shuffled_obs_key_groups: []
+
+# ----------------------------------------------------------------------------
+# 算法特定配置 (algo) — Diffusion Policy
+# ----------------------------------------------------------------------------
+algo:
+  optim_params:
+    policy:
+      learning_rate:
+        initial: 0.0001
+        decay_factor: 0.1
+        epoch_schedule: []
+      regularization: {L2: 0.0}
+
+  horizon:
+    observation_horizon: 2
+    action_horizon: 8
+    prediction_horizon: 16
+
+  unet:
+    enabled: true
+    diffusion_step_embed_dim: 256
+    down_dims: [256, 512, 1024]
+    kernel_size: 5
+    n_groups: 8
+
+  ema:
+    enabled: true
+    power: 0.75
+
+  ddpm:
+    enabled: false
+    num_train_timesteps: 100
+    num_inference_timesteps: 100
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    prediction_type: epsilon
+
+  ddim:
+    enabled: true
+    num_train_timesteps: 100
+    num_inference_timesteps: 10
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    set_alpha_to_one: true
+    steps_offset: 0
+    prediction_type: epsilon
+
+  noise_samples: 8
+
+# ----------------------------------------------------------------------------
+# 观察配置 (observation)
+# ----------------------------------------------------------------------------
+observation:
+  image_dim: [128, 128]
+
+  modalities:
+    obs:
+      low_dim:
+        - robot0_eef_pos            # 末端执行器位置 (3D)
+        - robot0_eef_quat           # 末端执行器四元数 (4D)
+        - robot0_gripper_qpos       # 夹爪位置 (2D)
+      rgb:
+        # ------------------------------------------------------------------
+        # RGB 图像输入：支持 1~3 张图片，按需取消注释即可
+        # 可选 key:
+        #   agentview_image             — 第三人称主相机 (左)
+        #   robot0_agentview_right_image — 第三人称右侧相机
+        #   robot0_eye_in_hand_image     — 手腕相机
+        #
+        # 不同图片数量下 combine MLP 输入维度 (feature_dim=512, low_dim=9):
+        #   1 张: 512+9=521  |  2 张: 1024+9=1033  |  3 张: 1536+9=1545
+        # 第一层 Linear 会自动适配输入维度，无需手动调整。
+        # ------------------------------------------------------------------
+        # --- 2 张图片 (默认) ---
+        # - agentview_image
+        # - robot0_eye_in_hand_image
+        # --- 1 张图片 (仅第三人称) ---
+        # - agentview_image
+        # --- 3 张图片 (双侧 + 手腕) ---
+        - agentview_image
+        - robot0_agentview_right_image
+        - robot0_eye_in_hand_image
+      depth: []
+      scan: []
+      # 语言条件：预计算 DistilBERT embedding，缓存于 .robocasa/lang_token/
+      # 启用：保留 lang_fixed/language_distilbert；禁用：设为 []
+      lang: [lang_fixed/language_distilbert]
+    goal:
+      low_dim: []
+      rgb: []
+      depth: []
+      scan: []
+
+  encoder:
+    low_dim:
+      core_class: null
+      core_kwargs: {}
+      obs_randomizer_class: null
+      obs_randomizer_kwargs: {}
+
+    rgb:
+      core_class: VisualCore
+      fuser: null
+      core_kwargs:
+        feature_dimension: 512
+        flatten: true
+        backbone_class: ResNet50Conv
+        backbone_kwargs:
+          pretrained: true
+          use_cam: false
+          downsample: false
+        pool_class: null
+        pool_kwargs: null
+      obs_randomizer_class:
+        - ColorRandomizer
+        - CropRandomizer
+      obs_randomizer_kwargs:
+        - {}
+        - {crop_height: 116, crop_width: 116, num_crops: 1, pos_enc: false}
+
+    depth:
+      core_class: VisualCore
+      core_kwargs: {}
+      obs_randomizer_class: null
+      obs_randomizer_kwargs: {}
+
+    scan:
+      core_class: ScanCore
+      core_kwargs: {}
+      obs_randomizer_class: null
+      obs_randomizer_kwargs: {}
+
+    lang:
+      core_class: null
+      core_kwargs: {}
+      obs_randomizer_class: null
+      obs_randomizer_kwargs: {}
+
+    # combine MLP 配置 (ObservationGroupEncoder 的融合层)
+    # 将所有 obs encoder 输出拼接后映射到统一维度，作为 UNet 的 global condition
+    # out_size 决定 obs 编码的最终维度，UNet global_cond_dim = out_size * obs_horizon
+    combine:
+      out_size: 512             # 输出维度
+      hidden_dims: [1024, 512]  # 隐藏层维度列表

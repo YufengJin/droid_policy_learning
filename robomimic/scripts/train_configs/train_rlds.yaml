@@ -131,7 +131,7 @@ train:
                           # 在 train.py:80 中使用，决定数据加载方式
 
   # RLDS 数据集配置
-  data_path: /workspace/dataset  # RLDS 数据集根目录
+  data_path: /workspace/datasets/droid  # RLDS 数据集根目录
                                  # 在 train.py:99 中使用: BASE_DATASET_KWARGS["data_dir"]
   dataset_names: [insert_pin]     # 要使用的数据集名称列表
                                  # 在 train.py:110 中使用，支持多个数据集联合训练

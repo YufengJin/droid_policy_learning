@@ -7,7 +7,14 @@ services:
       dockerfile: docker/Dockerfile
     image: droid-policy:latest
     container_name: droid-dev-gui
-    
+
+    # 容器崩溃或 Docker 重启后自动拉起，便于 Cursor 重连
+    restart: unless-stopped
+
+    # 保持交互式会话，利于 Cursor/IDE 远程连接稳定
+    tty: true
+    stdin_open: true
+
     environment:
       # X11 转发配置
       - DISPLAY=${DISPLAY}
@@ -18,17 +25,19 @@ services:
       # 挂载 droid_policy_learning 项目代码
       - ..:/workspace/droid_policy_learning
       # 挂载 DROID 数据集
-      - ~/localdisk/droid/droid_100:/workspace/dataset/droid_100
-      - ~/localdisk/droid/role_ros2:/workspace/dataset/role_ros2:ro
-      - ~/localdisk/droid/insert_pin:/workspace/dataset/insert_pin:ro
-      - ~/localdisk/droid/insert_pin_fixed:/workspace/dataset/insert_pin_fixed:ro
-      - ~/localdisk/droid/press_button:/workspace/dataset/press_button:ro
-      - ~/localdisk/droid/pnp_yellow_cup:/workspace/dataset/pnp_yellow_cup:ro
+      - /home/yjin/localdisk/droid/:/workspace/datasets/droid:ro
 
+      # robocasa datasets
+      - /home/yjin/localdisk/robocasa/:/workspace/datasets/robocasa:ro
+      
       # 挂载 X11 Socket 以支持 GUI 显示
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       # 挂载 Xauthority 以通过权限验证
       - ${HOME}/.Xauthority:/root/.Xauthority:rw
+
+      # 挂载 Hugging Face cache 以避免重复下载模型
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+
     # 使用 Host 网络模式通常能最方便地解决 X11 通信问题
     # 同时也能最大化网络性能（大模型训练推荐）
     network_mode: host

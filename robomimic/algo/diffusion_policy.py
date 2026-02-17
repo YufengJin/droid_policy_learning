@@ -6,6 +6,7 @@ import math
 from collections import OrderedDict, deque
 from packaging.version import parse as parse_version
 import random
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,10 +30,9 @@ import robomimic.utils.obs_utils as ObsUtils
 import os
 
 
-from transformers import AutoTokenizer, AutoModel
-tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
-lang_model = AutoModel.from_pretrained("distilbert-base-uncased", torch_dtype=torch.float16)
-lang_model.to('cuda')
+## Language embeddings are precomputed in RoboCasaDataset and stored in .robocasa/lang_token/.
+## The dataset returns them directly as "lang_fixed/language_distilbert" (768-d float32).
+## DistilBERT is NOT loaded at import time; it is only used during dataset construction.
 
 
 # import torch.distributed as dist
@@ -154,19 +154,28 @@ class DiffusionPolicyUNet(PolicyAlgo):
 
         input_batch = dict()
 
-        ## Semi-hacky fix which does the filtering for raw language which is just a list of lists of strings
-        input_batch["obs"] = {k: batch["obs"][k][:, :To, :] for k in batch["obs"] if "raw" not in k }
+        # Filter obs: skip "raw" keys; for lang, expand precomputed embedding to To
+        input_batch["obs"] = {}
+        for k in batch["obs"]:
+            if "raw" in k:
+                continue
+            v = batch["obs"][k]
+            if k == "lang_fixed/language_distilbert":
+                # Precomputed embedding: (B, 768) -> expand to (B, To, 768)
+                if isinstance(v, np.ndarray):
+                    v = torch.from_numpy(v)
+                if v.dim() == 1:
+                    v = v.unsqueeze(0)
+                if v.dim() == 2:
+                    v = v.unsqueeze(1).expand(-1, To, -1)
+                elif v.dim() == 3:
+                    v = v[:, :To, :]
+                input_batch["obs"][k] = v.float()
+            else:
+                input_batch["obs"][k] = v[:, :To, :]
         if "lang_fixed/language_raw" in batch["obs"].keys():
             str_ls = list(batch['obs']['lang_fixed/language_raw'][0])
             input_batch["obs"]["lang_fixed/language_raw"] = [str_ls] * To
-
-        with torch.no_grad():
-            if "raw_language" in batch["obs"].keys():
-                raw_lang_strings = [byte_string.decode('utf-8') for byte_string in batch["obs"]['raw_language']]
-                encoded_input = tokenizer(raw_lang_strings, padding=True, truncation=True, return_tensors='pt').to('cuda')
-                outputs = lang_model(**encoded_input)
-                encoded_lang = outputs.last_hidden_state.sum(1).squeeze().unsqueeze(1).repeat(1, To, 1)
-                input_batch["obs"]["lang_fixed/language_distilbert"] = encoded_lang.type(torch.float32)
 
         input_batch["actions"] = batch["actions"][:, :Tp, :]
         
@@ -356,15 +365,21 @@ class DiffusionPolicyUNet(PolicyAlgo):
                 obs_dict['camera/image/varied_camera_2_right_image'] = torch.cat([obs_dict['camera/image/varied_camera_2_right_image'], goal_varied_camera_2_right_image.repeat(1, To, 1, 1, 1)], dim=2) 
             # Note: currently assumes that you are never doing both goal and language conditioning
             else:
-                # Reads in current language instruction from file and fills the appropriate obs key, only will
-                # actually use it if the policy uses language instructions
+                # Reads in current language instruction from file and encodes with DistilBERT (lazy-loaded)
                 with open(os.path.join(root_path, "lang_command.txt"), 'r') as file:
                     raw_lang = file.read()
 
-                encoded_input = tokenizer(raw_lang, return_tensors='pt').to('cuda')
-                outputs = lang_model(**encoded_input)
-                encoded_lang = outputs.last_hidden_state.sum(1).squeeze().unsqueeze(0).repeat(To, 1).unsqueeze(0)
-                obs_dict["lang_fixed/language_distilbert"] = encoded_lang.type(torch.float32)
+                from transformers import AutoTokenizer, AutoModel as _AutoModel
+                if not hasattr(self, '_eval_tokenizer'):
+                    self._eval_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+                    self._eval_lang_model = _AutoModel.from_pretrained("distilbert-base-uncased", torch_dtype=torch.float32).to(self.device)
+                    self._eval_lang_model.eval()
+                with torch.no_grad():
+                    encoded_input = self._eval_tokenizer(raw_lang, return_tensors='pt')
+                    encoded_input = {k: v.to(self.device) for k, v in encoded_input.items()}
+                    outputs = self._eval_lang_model(**encoded_input)
+                    encoded_lang = outputs.last_hidden_state.sum(1).squeeze().unsqueeze(0).repeat(To, 1).unsqueeze(0)
+                    obs_dict["lang_fixed/language_distilbert"] = encoded_lang.float()
 
         ###############################
 

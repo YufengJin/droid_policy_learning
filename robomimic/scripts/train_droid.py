@@ -1,27 +1,28 @@
 """
-DDP (Distributed Data Parallel) training entry point.
+DROID DDP (Distributed Data Parallel) training entry point.
 
-与 train_rlds.py 一样通过 Hydra 从 train_configs 读取配置；启动方式使用 torchrun。
+支持 RLDS + HDF5 双格式。通过 Hydra 从 train_configs/train_rlds.yaml 读取配置；启动方式使用 torchrun。
+（原 train_ddp.py，重命名为 train_droid.py 以区分不同数据集的训练脚本。）
 
 Usage:
-  # 多卡（与 train_rlds 相同：Hydra + train_configs/train_rlds.yaml）:
-  torchrun --nproc_per_node=4 -m robomimic.scripts.train_ddp
+  # 多卡:
+  torchrun --nproc_per_node=4 -m robomimic.scripts.train_droid
 
   # 带覆盖:
-  torchrun --nproc_per_node=4 -m robomimic.scripts.train_ddp \
+  torchrun --nproc_per_node=4 -m robomimic.scripts.train_droid \
       train.data_path=/workspace/dataset train.dataset_names=[insert_pin] experiment.name=my_exp
 
-  # 可选 load_from（与 train_rlds 一致，会替换为 JSON 配置）:
-  torchrun --nproc_per_node=4 -m robomimic.scripts.train_ddp load_from=/path/to/generated.json
+  # 可选 load_from（会替换为 JSON 配置）:
+  torchrun --nproc_per_node=4 -m robomimic.scripts.train_droid load_from=/path/to/generated.json
 
   # 单卡（不设 RANK 时退化为单进程，仍用 Hydra + train_configs）:
-  python -m robomimic.scripts.train_ddp
+  python -m robomimic.scripts.train_droid
 
-Config 始终通过 Hydra 从 robomimic/scripts/train_configs 读取（与 train_rlds 一致）；运行用 torchrun。
+Config 始终通过 Hydra 从 robomimic/scripts/train_configs 读取；运行用 torchrun。
 
 正确退出与端口（MASTER_PORT，默认 29500）:
   - 脚本正常结束或按 Ctrl+C：会调用 cleanup_ddp()，进程退出后端口自动释放，无需手动关端口。
-  - 若用调试器点「Stop」只杀主进程、子进程未退出，端口可能仍被占：可先 pkill -f train_ddp 或换端口
+  - 若用调试器点「Stop」只杀主进程、子进程未退出，端口可能仍被占：可先 pkill -f train_droid 或换端口
     MASTER_PORT=29501 torchrun ...
 """
 

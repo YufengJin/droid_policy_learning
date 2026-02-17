@@ -140,13 +140,10 @@
     RUN micromamba run -n ${ENV_NAME} pip install -e /opt/third_party/octo
     
     # ------------------------------------------------------------
-    # 8. Project Setup
+    # 8. 工作目录（项目代码由 volume 挂载 ../:/workspace/droid_policy_learning 提供，
+    #     安装逻辑在 entrypoint.sh 中执行）
     # ------------------------------------------------------------
     WORKDIR /workspace/droid_policy_learning
-    COPY . /workspace/droid_policy_learning
-    
-    # Install current project
-    RUN micromamba run -n ${ENV_NAME} pip install -e . --no-deps
     
     # ------------------------------------------------------------
     # Entrypoint

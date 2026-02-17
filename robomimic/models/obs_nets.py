@@ -544,6 +544,12 @@ class ObservationGroupEncoder(Module):
         
         self.observation_group_shapes = observation_group_shapes
 
+        # Extract combine MLP config before passing encoder_kwargs to per-group factories.
+        # combine config is NOT a modality — it controls the final fusion MLP.
+        combine_cfg = None
+        if encoder_kwargs is not None and "combine" in encoder_kwargs:
+            combine_cfg = encoder_kwargs.pop("combine")
+
         # create an observation encoder per observation group
         self.nets = nn.ModuleDict()
         for obs_group in self.observation_group_shapes:
@@ -553,14 +559,27 @@ class ObservationGroupEncoder(Module):
                 encoder_kwargs=encoder_kwargs,
             )
 
-        self.out_size = 512
-        self.combine = nn.Sequential(
-                nn.Linear(self.combo_output_shape(), 1024),
-                nn.ReLU(),
-                nn.Linear(1024, 512),
-                nn.ReLU(),
-                nn.Linear(512, self.out_size)
-            )
+        # Build the combine MLP that maps concatenated group features to a
+        # fixed-size vector.  Dimensions are configurable via the ``combine``
+        # section in ``observation.encoder`` (YAML).
+        #
+        # Defaults (backward-compatible):
+        #   out_size    = 512
+        #   hidden_dims = [1024, 512]
+        if combine_cfg is not None:
+            self.out_size = int(combine_cfg.get("out_size", 512))
+            hidden_dims = list(combine_cfg.get("hidden_dims", [1024, 512]))
+        else:
+            self.out_size = 512
+            hidden_dims = [1024, 512]
+
+        layers = []
+        in_dim = self.combo_output_shape()
+        for h_dim in hidden_dims:
+            layers.extend([nn.Linear(in_dim, h_dim), nn.ReLU()])
+            in_dim = h_dim
+        layers.append(nn.Linear(in_dim, self.out_size))
+        self.combine = nn.Sequential(*layers)
 
     def forward(self, **inputs):
         """

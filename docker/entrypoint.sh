@@ -1,20 +1,22 @@
 #!/bin/bash
 set -e
 
+# 0. 确保 micromamba 在 PATH 中（/usr/local/bin 通常已在 PATH）
+export PATH="/usr/local/bin:${PATH:-/usr/bin:/bin}"
+
 # 1. 初始化 Micromamba shell hook
 # 这允许我们在脚本中使用 'micromamba activate'
-eval "$(micromamba shell hook --shell bash)"
+eval "$(micromamba shell hook --shell bash --root-prefix ${MAMBA_ROOT_PREFIX:-/opt/conda})"
 
 # 2. 激活环境
 micromamba activate droid_env
 
-# 3. 修复 Editable Install (关键步骤)
-# 当我们将宿主机目录挂载到 /workspace/droid_policy_learning 时，构建阶段生成的 egg-link 可能会失效。
-# 这里重新执行一次 install -e . --no-deps 确保环境正确链接到挂载的代码。
+# 3. 安装/刷新 Editable Install (关键步骤)
+# 项目由 volume 挂载 ../:/workspace/droid_policy_learning，构建阶段无法预先安装。
+# 每次容器启动时执行 pip install -e . --no-deps 确保环境正确链接到挂载的代码。
 if [ -f "/workspace/droid_policy_learning/setup.py" ] || [ -f "/workspace/droid_policy_learning/pyproject.toml" ]; then
-    echo ">> Detected local project in /workspace/droid_policy_learning. Refreshing editable install..."
+    echo ">> Detected project in /workspace/droid_policy_learning. Installing editable package..."
     cd /workspace/droid_policy_learning
-    # --no-deps 确保不重新下载庞大的依赖，只修复链接
     pip install -e . --no-deps > /dev/null 2>&1
     cd - > /dev/null
 fi
