@@ -2,6 +2,23 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Run Policy Server (debug)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robomimic.scripts.run_policy_server",
+      "args": [
+        "--ckpt",
+        "/workspace/droid_policy_learning/outputs/diffusion_policy__20260217_213225_robocasa/20260217213225/models/model_epoch_1_best_validation_0.13572172522544862.pth",
+        "--port",
+        "50051",
+        "--host",
+        "localhost"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
       "name": "Train RoboCasa (one demo, debug)",
       "type": "debugpy",
       "request": "launch",

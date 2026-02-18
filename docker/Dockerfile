@@ -128,7 +128,7 @@
         "tensorflow_graphics==2021.12.3" \
         "dlimp @ git+https://github.com/kvablack/dlimp@5edaa4691567873d495633f2708982b42edf1972" \
         plotly \
-        hydra-core>=1.1.0
+        "hydra-core>=1.1.0"
     # Install egl_probe separately with --no-build-isolation to access installed cmake
     # Set CMAKE_POLICY_VERSION_MINIMUM to work around CMake compatibility issue
     # (egl_probe's CMakeLists.txt requires old CMake version, but system has newer CMake)

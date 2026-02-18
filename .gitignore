@@ -184,3 +184,5 @@ outputs/
 
 # robocasa cache
 .robocasa/
+
+.cursor/
