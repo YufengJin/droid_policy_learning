@@ -53,7 +53,9 @@ from torch.utils.data.distributed import DistributedSampler
 from collections import OrderedDict
 
 import robomimic.utils.train_utils as TrainUtils
+import robomimic.utils.eval_utils as EvalUtils
 import robomimic.utils.torch_utils as TorchUtils
+import robomimic.utils.vis_utils as VisUtils
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.env_utils as EnvUtils
@@ -182,7 +184,7 @@ def get_config_from_args():
         if _mk not in _goal_cfg:
             config.observation.modalities.goal[_mk] = []
 
-    # 未指定实验名时：{algo}_{dataset_basename}_{timestamp}_robocasa
+    # 未指定实验名时：{algo}_{dataset}_{timestamp}，例如 diffusion_policy_droid_100_20260129_085414
     exp_name = config.experiment.name
     if exp_name is None or exp_name == "null" or (isinstance(exp_name, str) and exp_name.strip() == ""):
         algo_name = config.algo_name
@@ -191,12 +193,14 @@ def get_config_from_args():
         if isinstance(data_cfg, list) and len(data_cfg) > 0:
             first_path = data_cfg[0].get("path", "unknown") if isinstance(data_cfg[0], dict) else str(data_cfg[0])
             dataset_str = os.path.splitext(os.path.basename(first_path))[0]
-            if len(data_cfg) > 1:
+            if not dataset_str:
+                dataset_str = "robocasa"
+            elif len(data_cfg) > 1:
                 dataset_str += "_plus{}".format(len(data_cfg) - 1)
         else:
             dataset_str = "robocasa"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        config.experiment.name = "{}_{}_{}_robocasa".format(algo_name, dataset_str, timestamp)
+        config.experiment.name = "{}_{}_{}".format(algo_name, dataset_str, timestamp)
 
     if debug:
         config.unlock()
@@ -206,7 +210,9 @@ def get_config_from_args():
         config.experiment.validation_epoch_every_n_steps = 3
         config.train.num_epochs = 200
         config.experiment.mse.every_n_epochs = 2
-        config.experiment.save.every_n_epochs = 1
+        config.experiment.save.every_n_epochs = 1      # 每 epoch 保存，测试 save ckpt
+        config.experiment.save.on_best_validation = True  # 测试 best valid 保存
+        config.experiment.mse.visualize = True         # 测试 vis save
         config.experiment.rollout.rate = 1
         config.experiment.rollout.n = 2
         config.experiment.rollout.horizon = 10
@@ -647,7 +653,8 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                     ckpt_reason = updated_stats["ckpt_reason"]
 
         # -------------------------------------------------------------------
-        # MSE：从 train_loader 取一批，算预测动作与真实动作的 MSE/MAE（rank 0）
+        # MSE：从 train_loader 取一批，算预测动作与真实动作误差（参考 train_droid）
+        # RoboCasa 7D：pos(3) + euler(3) + gripper(1)
         # -------------------------------------------------------------------
         if config.experiment.mse.enabled and is_main:
             should_save_mse = (
@@ -657,7 +664,9 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
             if should_save_mse:
                 unwrapped.set_eval()
                 unwrapped.reset()
-                # Sample a batch for MSE evaluation
+                save_vis_dir = None
+                if config.experiment.mse.visualize:
+                    save_vis_dir = os.path.join(vis_dir, epoch_ckpt_name)
                 try:
                     mse_batch = next(iter(train_loader))
                 except StopIteration:
@@ -672,15 +681,62 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                         actual_actions = input_batch["actions"]
                     predicted_np = TensorUtils.to_numpy(predicted_actions)
                     actual_np = TensorUtils.to_numpy(actual_actions)
-                    # Compute position and rotation errors
-                    mse_all = float(np.mean((predicted_np - actual_np) ** 2))
-                    mae_all = float(np.mean(np.abs(predicted_np - actual_np)))
+                    # Position error (first 3 dims)
+                    predicted_pos = predicted_np[..., :3]
+                    actual_pos = actual_np[..., :3]
+                    pos_err_stats = EvalUtils.compute_pos_err(predicted_pos, actual_pos)
+                    # Rotation error (dims 3:6, euler) - convert to matrix for compute_rot_err
+                    predicted_rot = predicted_np[..., 3:6]
+                    actual_rot = actual_np[..., 3:6]
+                    pred_rot_mat = TorchUtils.euler_angles_to_matrix(
+                        torch.tensor(predicted_rot, dtype=torch.float32), "XYZ"
+                    )
+                    actual_rot_mat = TorchUtils.euler_angles_to_matrix(
+                        torch.tensor(actual_rot, dtype=torch.float32), "XYZ"
+                    )
+                    rot_err_stats = EvalUtils.compute_rot_err(
+                        pred_rot_mat, actual_rot_mat, rot_format="matrix"
+                    )
                     mse_log = {
-                        "evaluate/action_mse": mse_all,
-                        "evaluate/action_mae": mae_all,
+                        "evaluate/cartesian_position_error/mean": pos_err_stats["mean"],
+                        "evaluate/cartesian_position_error/max": pos_err_stats["max"],
+                        "evaluate/cartesian_position_error/min": pos_err_stats["min"],
+                        "evaluate/cartesian_position_error/std": pos_err_stats["std"],
+                        "evaluate/cartesian_position_error/mse": pos_err_stats["mse"],
+                        "evaluate/rotation_error/mean": rot_err_stats["mean"],
+                        "evaluate/rotation_error/max": rot_err_stats["max"],
+                        "evaluate/rotation_error/min": rot_err_stats["min"],
+                        "evaluate/rotation_error/std": rot_err_stats["std"],
+                        "evaluate/rotation_error/mse": rot_err_stats.get("mse", 0.0),
                     }
                     for k, v in mse_log.items():
                         data_logger.record(k, v, epoch)
+                    print("MSE Log Epoch {}".format(epoch))
+                    print(json.dumps(mse_log, sort_keys=True, indent=4))
+                    # Vis save: batch 图像拼接图（仅 rgb 图像，排除 lang 等）
+                    if save_vis_dir is not None:
+                        rgb_keys = getattr(config.observation.modalities.obs, "rgb", None) or []
+                        images = {}
+                        for k in rgb_keys:
+                            if k in input_batch["obs"] and isinstance(input_batch["obs"][k], torch.Tensor):
+                                v = input_batch["obs"][k]
+                                if v.ndim >= 5:
+                                    t = v[: config.experiment.mse.num_samples, 0, :, :, :]
+                                elif v.ndim == 4:
+                                    t = v[: config.experiment.mse.num_samples]
+                                else:
+                                    continue
+                                if t.ndim == 4 and t.shape[1] in (1, 3, 4):
+                                    t = t.permute(0, 2, 3, 1)
+                                    images[k] = t
+                        if images:
+                            os.makedirs(save_vis_dir, exist_ok=True)
+                            save_path = os.path.join(save_vis_dir, "batch_images.png")
+                            try:
+                                VisUtils.make_batch_vis_plot(save_path=save_path, images=images)
+                                print("Saved batch vis to {}".format(save_path))
+                            except Exception as e:
+                                print("Vis save failed: {}".format(e))
                 unwrapped.set_train()
 
         # -------------------------------------------------------------------

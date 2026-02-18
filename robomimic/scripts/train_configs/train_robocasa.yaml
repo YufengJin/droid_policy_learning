@@ -220,7 +220,7 @@ observation:
         # --- 1 张图片 (仅第三人称) ---
         # - agentview_image
         # --- 3 张图片 (双侧 + 手腕) ---
-        - agentview_image
+        # - agentview_image
         - robot0_agentview_right_image
         - robot0_eye_in_hand_image
       depth: []
