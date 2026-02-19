@@ -53,7 +53,7 @@ experiment:
     every_n_epochs: 10
     on_save_ckpt: true
     num_samples: 6
-    visualize: true
+    visualize: false
 
   save:
     enabled: true

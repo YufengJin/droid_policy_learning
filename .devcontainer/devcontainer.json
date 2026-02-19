@@ -1,0 +1,21 @@
+{
+  "name": "Droid Policy Learning",
+  "dockerComposeFile": ["../docker/docker-compose.headless.yaml"],
+  "service": "droid-dev",
+  "workspaceFolder": "/workspace/droid_policy_learning",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "redhat.vscode-yaml",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  },
+
+  "postCreateCommand": "pip install --no-deps -e . 2>/dev/null || true",
+  "remoteUser": "root"
+}

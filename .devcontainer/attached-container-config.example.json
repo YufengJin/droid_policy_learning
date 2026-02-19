@@ -1,0 +1,11 @@
+{
+  "workspaceFolder": "/workspace/droid_policy_learning",
+  "extensions": [
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "ms-python.debugpy",
+    "redhat.vscode-yaml",
+    "ms-azuretools.vscode-docker"
+  ],
+  "remoteUser": "root"
+}

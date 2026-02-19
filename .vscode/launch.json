@@ -8,9 +8,9 @@
       "module": "robomimic.scripts.run_policy_server",
       "args": [
         "--ckpt",
-        "/workspace/droid_policy_learning/outputs/diffusion_policy__20260217_213225_robocasa/20260217213225/models/model_epoch_1_best_validation_0.13572172522544862.pth",
+        "/workspace/droid_policy_learning/outputs/diffusion_policy_multi_stage_20260219_084342/20260219084342/models/model_epoch_50_best_validation_0.02864629030227661.pth",
         "--port",
-        "50051",
+        "8000",
         "--host",
         "localhost"
       ],

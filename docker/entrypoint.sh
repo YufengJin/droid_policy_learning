@@ -17,7 +17,7 @@ micromamba activate droid_env
 if [ -f "/workspace/droid_policy_learning/setup.py" ] || [ -f "/workspace/droid_policy_learning/pyproject.toml" ]; then
     echo ">> Detected project in /workspace/droid_policy_learning. Installing editable package..."
     cd /workspace/droid_policy_learning
-    pip install -e . --no-deps > /dev/null 2>&1
+    pip install -e . > /dev/null 2>&1
     cd - > /dev/null
 fi
 

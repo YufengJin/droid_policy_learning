@@ -32,6 +32,7 @@ setup(
         "diffusers==0.11.1",
         "opencv-python",
         "transformers==4.34.0",
+        "policy-websocket @ git+https://github.com/YufengJin/policy_websocket.git",
     ],
     eager_resources=['*'],
     include_package_data=True,
