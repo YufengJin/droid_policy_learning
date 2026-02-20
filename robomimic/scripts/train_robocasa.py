@@ -95,6 +95,15 @@ def _robocasa_collate_fn(batch):
     return torch.utils.data.dataloader.default_collate(batch)
 
 
+def _get_rollout_img_res(config, rollout_cfg):
+    """Use observation.image_dim to match training resolution; fallback to rollout.img_res."""
+    if hasattr(config.observation, "image_dim") and config.observation.image_dim:
+        dim = config.observation.image_dim
+        if isinstance(dim, (list, tuple)) and len(dim) >= 1:
+            return int(dim[0])
+    return getattr(rollout_cfg, "img_res", 128)
+
+
 # ---------------------------------------------------------------------------
 # DDP helpers
 # ---------------------------------------------------------------------------
@@ -459,6 +468,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                     env_names.append(ae)
         robocasa_style = getattr(config.experiment.rollout, "robocasa_style", False)
         rollout_cfg = config.experiment.rollout
+        rollout_img_res = _get_rollout_img_res(config, rollout_cfg)
 
         for env_name in env_names:
             try:
@@ -466,7 +476,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                     env = RobocasaRolloutUtils.create_robocasa_env_for_rollout(
                         env_name=env_name,
                         robots=getattr(rollout_cfg, "robots", "PandaMobile"),
-                        img_res=getattr(rollout_cfg, "img_res", 224),
+                        img_res=rollout_img_res,
                         obj_instance_split=getattr(rollout_cfg, "obj_instance_split", "B"),
                         layout_and_style_ids=getattr(
                             rollout_cfg, "layout_and_style_ids", "((1,1),(2,2),(4,4),(6,9),(7,10))"
@@ -517,7 +527,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                         extra = RobocasaRolloutUtils.create_robocasa_env_for_rollout(
                             env_name=env_name,
                             robots=getattr(rollout_cfg, "robots", "PandaMobile"),
-                            img_res=getattr(rollout_cfg, "img_res", 224),
+                            img_res=rollout_img_res,
                             obj_instance_split=getattr(rollout_cfg, "obj_instance_split", "B"),
                             layout_and_style_ids=getattr(
                                 rollout_cfg, "layout_and_style_ids", "((1,1),(2,2),(4,4),(6,9),(7,10))"
@@ -716,10 +726,11 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                     _rcfg = rollout_cfg
                     _shape_meta = shape_meta
                     def _factory(env_name):
+                        _img_res = _get_rollout_img_res(_cfg, _rcfg)
                         env = RobocasaRolloutUtils.create_robocasa_env_for_rollout(
                             env_name=env_name,
                             robots=getattr(_rcfg, "robots", "PandaMobile"),
-                            img_res=getattr(_rcfg, "img_res", 224),
+                            img_res=_img_res,
                             obj_instance_split=getattr(_rcfg, "obj_instance_split", "B"),
                             layout_and_style_ids=getattr(
                                 _rcfg, "layout_and_style_ids", "((1,1),(2,2),(4,4),(6,9),(7,10))"

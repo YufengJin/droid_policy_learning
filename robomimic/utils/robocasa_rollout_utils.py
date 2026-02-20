@@ -36,7 +36,7 @@ def _restore_robosuite_log_level(prev_level):
 ROBOCASA_ROLLOUT_CONFIG_DEFAULTS = {
     "layout_and_style_ids": None,
     "obj_instance_split": "B",
-    "img_res": 224,
+    "img_res": 128,
     "num_wait_steps": 10,
     "robots": "PandaMobile",
     "parallel_workers": 1,
@@ -115,7 +115,7 @@ def _get_task_description_from_env(env, task_name_fallback=None):
 def create_robocasa_env_for_rollout(
     env_name,
     robots="PandaMobile",
-    img_res=224,
+    img_res=128,
     obj_instance_split="B",
     layout_and_style_ids="((1,1),(2,2),(4,4),(6,9),(7,10))",
     seed=None,

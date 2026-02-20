@@ -156,9 +156,9 @@ class TrainedPolicyAdapter(BasePolicy):
             self.image_size = image_size
         elif hasattr(config.observation, "image_dim") and config.observation.image_dim:
             dim = config.observation.image_dim
-            self.image_size = (dim[0], dim[1] if len(dim) > 1 else dim[0]) if isinstance(dim, (list, tuple)) else None
+            self.image_size = (dim[0], dim[1] if len(dim) > 1 else dim[0]) if isinstance(dim, (list, tuple)) else (128, 128)
         else:
-            self.image_size = None
+            self.image_size = (128, 128)  # Unified 128 for RoboCasa
 
         self.rgb_keys = set()
         self.low_dim_keys = set()

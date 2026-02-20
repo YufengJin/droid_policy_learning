@@ -90,7 +90,7 @@ experiment:
     # RoboCasa-style rollout (when robocasa_style: true)
     layout_and_style_ids: "((1,1),(2,2),(4,4),(6,9),(7,10))"
     obj_instance_split: "B"
-    img_res: 224
+    img_res: 128  # Unified 128; uses image_dim[0] when set, else this fallback
     num_wait_steps: 10
     robots: "PandaMobile"
 
