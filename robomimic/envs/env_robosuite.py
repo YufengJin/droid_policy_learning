@@ -7,7 +7,22 @@ import json
 import numpy as np
 from copy import deepcopy
 
-import mujoco_py
+# MuJoCo 2.x (robosuite 2.x / RoboCasa) uses mujoco.FatalError, mujoco.UnexpectedError;
+# MuJoCo 1.x uses mujoco_py.builder.MujocoException.
+# Prefer mujoco (no mujoco_py) so RoboCasa/robosuite 2.x works.
+def _get_rollout_exceptions():
+    try:
+        import mujoco
+        return (mujoco.FatalError, mujoco.UnexpectedError)
+    except (ImportError, AttributeError):
+        try:
+            import mujoco_py
+            return (mujoco_py.builder.MujocoException,)
+        except ImportError:
+            return (Exception,)
+
+_ROLLOUT_EXCEPTIONS = _get_rollout_exceptions()
+
 import robosuite
 
 import robomimic.utils.obs_utils as ObsUtils
@@ -374,7 +389,7 @@ class EnvRobosuite(EB.EnvBase):
         that the entire training run doesn't crash because of a bad policy that causes unstable
         simulation computations.
         """
-        return (mujoco_py.builder.MujocoException)
+        return _ROLLOUT_EXCEPTIONS
 
     def __repr__(self):
         """

@@ -12,6 +12,21 @@ This repository contains code for training and evaluating policies on the [DROID
 
 -------
 ## Installation
+
+### Option A: Docker (Recommended)
+
+Use the provided Docker setup for a reproducible environment with GPU support:
+
+```bash
+docker compose -f docker/docker-compose.headless.yaml build
+docker compose -f docker/docker-compose.headless.yaml up -d
+docker exec -it droid-dev-headless bash
+```
+
+See **[docker/README.md](docker/README.md)** for full installation, configuration, and usage instructions (including optional Robocasa support).
+
+### Option B: Conda (Local)
+
 Create a python3 conda environment (tested with Python 3.10) and run the following:
 
 1. Create python 3.10 conda environment: `conda create --name droid_policy_learning_env python=3.10`

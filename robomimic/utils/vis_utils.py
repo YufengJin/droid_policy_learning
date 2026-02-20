@@ -2,8 +2,10 @@
 This file contains utility functions for visualizing image observations in the training pipeline.
 These functions can be a useful debugging tool.
 """
-import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # Non-interactive backend: save-only, no display
 import matplotlib.pyplot as plt
+import numpy as np
 import os
 
 import robomimic.utils.tensor_utils as TensorUtils

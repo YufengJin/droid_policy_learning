@@ -25,7 +25,6 @@
       "module": "robomimic.scripts.train_robocasa",
       "args": [
         "train.data=[{path: /workspace/datasets/robocasa/v0.1/multi_stage/brewing/PrepareCoffee/2024-05-07/demo_im128.hdf5}]",
-        "train.hdf5_filter_key=null",
         "debug=true"
       ],
       "cwd": "${workspaceFolder}",
@@ -47,13 +46,12 @@
       "justMyCode": false
     },
     {
-      "name": "Train RoboCasa (multi_stage only)",
+      "name": "Train RoboCasa (CloseSingleDoor only)",
       "type": "debugpy",
       "request": "launch",
       "module": "robomimic.scripts.train_robocasa",
       "args": [
-        "train.data=[{path: /workspace/datasets/robocasa/v0.1/multi_stage/}]",
-        "train.hdf5_filter_key=null",
+        "train.data=[{path: /workspace/datasets/robocasa/v0.1/single_stage/kitchen_doors/CloseSingleDoor/2024-04-24/demo_gentex_im128_randcams.hdf5}]",
         "debug=true"
       ],
       "cwd": "${workspaceFolder}",

@@ -34,7 +34,6 @@ import pickle
 import numpy as np
 import h5py
 from collections import OrderedDict, defaultdict
-from copy import deepcopy
 
 import torch
 import torch.utils.data
@@ -140,6 +139,67 @@ ROBOCASA_LOW_DIM_KEYS = OrderedDict([
     ("robot0_gripper_qpos", None),  # from obs/robot0_gripper_qpos (v0.1) or robot_states[:, 7:9]
     ("robot_states", "robot_states"),
 ])
+
+
+def get_unique_env_names_from_robocasa_data(data_dir, filter_key=None):
+    """
+    Scan RoboCasa HDF5 files and return unique env names used in the dataset.
+    Env names are used for rollout: each unique env gets its own environment instance.
+
+    Sources (in order):
+      1. data.attrs["env"] - RoboCasa convert_to_robomimic_format stores this
+      2. data.attrs["env_args"] - JSON with "env_name" (robomimic standard)
+
+    Args:
+        data_dir (str): Directory containing HDF5 file(s), or path to single .h5 file
+        filter_key (str | None): If set, only consider demos in mask/filter_key
+
+    Returns:
+        list[str]: Sorted unique env names. Empty if none found.
+    """
+    hdf5_files = get_hdf5_files(data_dir)
+    by_dir = defaultdict(list)
+    for f in hdf5_files:
+        by_dir[os.path.dirname(f)].append(f)
+    filtered = []
+    for d, flist in by_dir.items():
+        im128 = [p for p in flist if "_im128" in os.path.basename(p)]
+        filtered.extend(im128 if im128 else flist)
+    hdf5_files = sorted(filtered)
+    if not hdf5_files and os.path.isfile(data_dir) and data_dir.lower().endswith((".h5", ".hdf5")):
+        hdf5_files = [data_dir]
+
+    env_names = set()
+    for fpath in hdf5_files:
+        try:
+            with h5py.File(fpath, "r") as f:
+                if "data" not in f:
+                    continue
+                data_grp = f["data"]
+                env_name = None
+                # 1. RoboCasa: data.attrs["env"]
+                env_name = data_grp.attrs.get("env", None)
+                if env_name is None and "env_args" in data_grp.attrs:
+                    # 2. env_args JSON with env_name (robomimic standard)
+                    env_args = data_grp.attrs["env_args"]
+                    if isinstance(env_args, bytes):
+                        env_args = env_args.decode("utf-8")
+                    em = json.loads(env_args) if isinstance(env_args, str) else env_args
+                    if isinstance(em, dict) and "env_name" in em:
+                        env_name = em["env_name"]
+                if env_name is None:
+                    # 3. Fallback: use parent dir name (e.g. v0.1/multi_stage/PnPCounterToCab/demo_im128.hdf5)
+                    parent = os.path.basename(os.path.dirname(fpath))
+                    if parent and parent not in ("data", "train", "val", "multi_stage", "single_stage"):
+                        env_name = parent
+                if env_name is not None:
+                    if isinstance(env_name, bytes):
+                        env_name = env_name.decode("utf-8")
+                    env_names.add(str(env_name))
+        except Exception:
+            pass
+
+    return sorted(env_names)
 
 
 class RoboCasaDataset(torch.utils.data.Dataset):

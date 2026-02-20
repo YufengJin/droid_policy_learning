@@ -627,7 +627,7 @@ class RolloutPolicy(object):
     """
     Wraps @Algo object to make it easy to run policies in a rollout loop.
     """
-    def __init__(self, policy, obs_normalization_stats=None, action_normalization_stats=None):
+    def __init__(self, policy, obs_normalization_stats=None, action_normalization_stats=None, goal_mode=None, eval_mode=True):
         """
         Args:
             policy (Algo instance): @Algo object to wrap to prepare for rollouts
@@ -636,10 +636,22 @@ class RolloutPolicy(object):
                 normalization. This should map observation keys to dicts
                 with a "mean" and "std" of shape (1, ...) where ... is the default
                 shape for the observation.
+
+            goal_mode: goal mode for goal-conditioned policies (e.g. from config.train.goal_mode).
+                Defaults to policy.global_config.train.goal_mode if available.
+
+            eval_mode (bool): if True, policy runs in eval mode (default for rollout).
         """
         self.policy = policy
         self.obs_normalization_stats = obs_normalization_stats
         self.action_normalization_stats = action_normalization_stats
+        if goal_mode is not None:
+            self.goal_mode = goal_mode
+        elif hasattr(policy, "global_config") and hasattr(policy.global_config, "train") and hasattr(policy.global_config.train, "goal_mode"):
+            self.goal_mode = policy.global_config.train.goal_mode
+        else:
+            self.goal_mode = None
+        self.eval_mode = eval_mode
 
     def start_episode(self):
         """

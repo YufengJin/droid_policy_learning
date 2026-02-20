@@ -1,17 +1,11 @@
-version: '3.8'
-
 services:
   droid-dev:
-    # 构建上下文设为上一级目录（项目根目录）
     build:
       context: ..
       dockerfile: docker/Dockerfile
     image: droid-policy:latest
     container_name: droid-dev-headless
-
     restart: unless-stopped
-
-    # 保持交互式会话，利于 Cursor/IDE 远程连接稳定
     tty: true
     stdin_open: true
 
@@ -19,55 +13,33 @@ services:
       - PYTHONUNBUFFERED=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
-    
-    # 使用 Host 网络模式以最大化网络性能（大模型训练推荐）
+      # 禁用 Open VSX，改用官方 Marketplace，避免 sigzip 校验失败导致 debugger 等扩展无法安装
+      - OVSX_REGISTRY_URL=
+
     network_mode: host
-    
-    # IPC 主机模式：提供无限制共享内存访问，LLM 训练必需
     ipc: host
-    
-    # PID 主机模式：允许监控工具（nvtop, htop, wandb）正确显示系统资源
     pid: host
-    
-    # 挂载当前项目代码和数据集
+
     volumes:
-      # 挂载 droid_policy_learning 项目代码
       - ..:/workspace/droid_policy_learning
-      # 挂载 DROID 数据集
       - /home/yjin/localdisk/droid/:/workspace/datasets/droid:ro
-
-      # robocasa datasets
       - /home/yjin/localdisk/robocasa/:/workspace/datasets/robocasa:ro
-      
-      # 挂载 Hugging Face cache 以避免重复下载模型
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
-
-      # code reference
       - /home/yjin/repos/cosmos-policy/:/workspace/cosmos-policy:ro
-
       - /home/yjin/repos/robocasa/:/workspace/robocasa:ro
-    # 保持容器运行
+
     command: tail -f /dev/null
-    
-    # 资源预留配置 (Docker Compose v2+ 标准写法)
+
     deploy:
       resources:
-        # 不设置 limits 表示不限制内存，使用主机所有可用内存（大模型训练需要）
         reservations:
           devices:
             - driver: nvidia
               count: all
               capabilities: [gpu, compute, utility]
-    
-    # 系统资源限制优化
+
     ulimits:
-      # 增加文件描述符限制（大模型训练可能需要打开大量文件）
-      nofile:
-        soft: 65536
-        hard: 65536
-      # 增加进程数限制
+      nofile: { soft: 65536, hard: 65536 }
       nproc: 65536
-      # 无限制内存锁定：CUDA Pinned Memory (DMA transfers) 必需
       memlock: -1
-      # 增加栈大小：防止深度递归栈导致的段错误
       stack: 67108864

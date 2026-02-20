@@ -1,0 +1,3 @@
+[submodule "benchmarks/robocasa"]
+	path = benchmarks/robocasa
+	url = git@github.com:YufengJin/robocasa.git

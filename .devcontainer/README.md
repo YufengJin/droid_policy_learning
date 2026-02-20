@@ -50,7 +50,20 @@
 - 仍可尝试一次「Reopen in Container」看是否生效。  
 - 若未生效，改用上面的「附加到已运行容器」，并按 **1** 在「Open Container Configuration File」里添加 `extensions`，或对每个扩展使用「Install in Container」。
 
-### 其他可能原因
+### 3. 报错「End of central directory record signature not found / zip truncated」
+
+**原因**：Cursor 使用 `OVSX_REGISTRY_URL` 时，会从 Open VSX 拉取扩展并校验 `.sigzip` 签名。若缺少 `node-ovsx-sign` 或校验失败，会报此错。
+
+**本仓库已做的修复**：
+
+- 在 `devcontainer.json` 与 `docker-compose.headless.yaml` 中设置 `OVSX_REGISTRY_URL=`，强制使用官方 Marketplace 而非 Open VSX。  
+- 若已启动容器，需**重新构建/启动**（Reopen in Container 或 `docker compose up -d --force-recreate`）后环境变量才会生效。
+
+**若仍未解决，可手动安装**：在容器内执行  
+`curl -sL --compressed -o /tmp/debugpy.vsix "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-python/vsextensions/debugpy/latest/vspackage"`  
+然后在扩展面板 → 右上角 `...` →「从 VSIX 安装…」→ 选择 `/tmp/debugpy.vsix`。
+
+### 4. 其他可能原因
 
 - **网络**：容器内无法访问扩展市场（如公司代理/防火墙），会安装失败；需在容器或主机配置代理。  
 - **权限**：Cursor 在容器内写入的目录（如 `~/.cursor-server`）不可写时也会失败；当前镜像以 root 运行，一般无此问题。

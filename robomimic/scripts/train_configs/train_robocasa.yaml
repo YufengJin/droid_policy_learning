@@ -80,11 +80,19 @@ experiment:
 
   rollout:
     enabled: false
-    n: 50
+    robocasa_style: true   # Use run_eval-style env creation, episode loop, and three-view video
+    n: 5                   # Episodes per env per rollout
     horizon: 400
-    rate: 50
+    rate: 50               # Run rollout every 50 epochs
+    parallel_workers: 5    # Parallel workers for rollout; 1=serial
     warmstart: 0
     terminate_on_success: true
+    # RoboCasa-style rollout (when robocasa_style: true)
+    layout_and_style_ids: "((1,1),(2,2),(4,4),(6,9),(7,10))"
+    obj_instance_split: "B"
+    img_res: 224
+    num_wait_steps: 10
+    robots: "PandaMobile"
 
 # ----------------------------------------------------------------------------
 # 训练配置 (train)

@@ -4,7 +4,7 @@
   "service": "droid-dev",
   "workspaceFolder": "/workspace/droid_policy_learning",
 
-  "customizations": {
+  "containerEnv":{"OVSX_REGISTRY_URL":""},"customizations": {
     "vscode": {
       "extensions": [
         "ms-python.python",

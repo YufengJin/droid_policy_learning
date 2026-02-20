@@ -127,7 +127,7 @@ class BaseConfig(Config):
         self.experiment.rollout.rate = 50                           # do rollouts every @rate epochs
         self.experiment.rollout.warmstart = 0                       # number of epochs to wait before starting rollouts
         self.experiment.rollout.terminate_on_success = True         # end rollout early after task success
-
+        self.experiment.rollout.robocasa_style = False              # RoboCasa-style rollout (run_eval env, episode loop, three-view video)
         # for updating the evaluation env meta data
         self.experiment.env_meta_update_dict = Config()
         self.experiment.env_meta_update_dict.do_not_lock_keys()
