@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robomimic"
+version = "0.3.0"
+description = "Robomimic fork for DROID / multi-dataset policy learning"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Suraj Nair, Ashwin Balakrishna, Soroush Nasiriany", email = "ashwin.balakrishna@tri.global" },
+]
+dependencies = [
+    "absl-py",
+    "chex==0.1.85",
+    "cmake",
+    "diffusers==0.11.1",
+    "egl_probe>=1.0.1",
+    "distrax==0.1.5",
+    "dlimp @ git+https://github.com/kvablack/dlimp@5edaa4691567873d495633f2708982b42edf1972",
+    "einops",
+    "flax==0.7.5",
+    "gym",
+    "h5py",
+    "hydra-core>=1.1.0",
+    "imageio",
+    "imageio-ffmpeg",
+    "jax[cuda11_pip]==0.4.20",
+    "matplotlib",
+    "ml_collections",
+    "ml_dtypes==0.2.0",
+    "moviepy",
+    "numpy==1.24.3",
+    "opencv-python",
+    "optax==0.1.5",
+    "plotly",
+    "pre-commit==3.3.3",
+    "protobuf>=3.20.3,<4.25",
+    "psutil",
+    "scipy",
+    "tensorboard",
+    "tensorboardX",
+    "tensorflow==2.15.0",
+    "tensorflow-addons>=0.23.0",
+    "tensorflow_datasets==4.9.2",
+    "tensorflow_graphics==2021.12.3",
+    "tensorflow_hub",
+    "tensorflow_probability==0.23.0",
+    "tensorflow_text",
+    "termcolor",
+    "torch==2.0.1+cu118",
+    "torchvision==0.15.2+cu118",
+    "tqdm",
+    "transformers==4.34.0",
+    "wandb",
+    "policy-websocket @ git+https://github.com/YufengJin/policy_websocket.git",
+]
+
+[project.optional-dependencies]
+robocasa = [
+    "hidapi",
+    "lxml",
+    "mujoco==3.2.6",
+    # 0.56.x requires numpy<1.24; base stack uses numpy 1.24.3
+    "numba>=0.57.0,<0.59",
+    "pillow",
+    "pynput",
+    "pygame",
+    "pyyaml",
+    "tianshou==0.4.10",
+]
+
+# JAX CUDA wheels (jaxlib) are hosted here, not on PyPI
+# tianshou 0.4.10 pins protobuf<3.20; TF stack needs protobuf>=3.20.3
+[tool.uv]
+find-links = ["https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"]
+override-dependencies = ["protobuf>=3.20.3,<4.25"]
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["robomimic*"]
+
+[tool.setuptools]
+include-package-data = true

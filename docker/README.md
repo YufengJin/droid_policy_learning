@@ -9,6 +9,16 @@
 docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu20.04 nvidia-smi
 ```
 
+## Dependencies (uv)
+
+Runtime versions are pinned in `pyproject.toml` and `uv.lock`. Refresh the lockfile after editing dependencies:
+
+```bash
+uv lock
+```
+
+Docker installs the locked environment with `uv sync --frozen --no-install-project` (see `docker/Dockerfile`).
+
 ## Build
 
 From project root:
@@ -19,6 +29,14 @@ docker compose -f docker/docker-compose.headless.yaml build
 
 # With Robocasa (~5GB extra; assets downloaded on first run)
 docker compose -f docker/docker-compose.headless.yaml build --build-arg INCLUDE_ROBOCASA=1
+```
+
+### Import smoke test (after build)
+
+```bash
+docker build -f docker/Dockerfile -t droid-policy:uv-test .
+docker run --rm -v "$PWD:/workspace/droid_policy_learning" -w /workspace/droid_policy_learning droid-policy:uv-test \
+  python -u scripts/test_train_imports.py
 ```
 
 | Build arg       | Default | Description                          |
@@ -68,8 +86,8 @@ docker run --rm --gpus all \
 
 On each start:
 
-1. Activates `droid_env`
-2. Runs `pip install -e . --no-deps` when project is mounted
+1. Uses uv-managed venv at `/opt/venv` (Python 3.10)
+2. When `pyproject.toml` is present: `uv pip install -e .` (deps already synced in the image). Legacy `setup.py`-only trees use `uv pip install -e . --no-deps`
 3. If `INCLUDE_ROBOCASA=1`: installs Robocasa, downloads assets if needed, runs `setup_macros`
 
 ## Robocasa

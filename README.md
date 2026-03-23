@@ -25,6 +25,30 @@ docker exec -it droid-dev-headless bash
 
 See **[docker/README.md](docker/README.md)** for full installation, configuration, and usage instructions (including optional Robocasa support).
 
+#### Updating the Python environment (`uv`, `/opt/venv`)
+
+The Docker image installs dependencies into **`/opt/venv`** (not a project-local `.venv`). To **refresh or update** that environment after you change `pyproject.toml` / `uv.lock` or pull new commits:
+
+```bash
+cd /workspace/droid_policy_learning
+export VIRTUAL_ENV=/opt/venv
+export PATH="/opt/venv/bin:$PATH"
+
+# Regenerate the lockfile only if you edited dependencies in pyproject.toml
+# uv lock
+
+# Install exactly what the repo lockfile specifies (matches docker/Dockerfile)
+uv sync --frozen --no-install-project --active
+
+# Editable install of this repo into the same environment
+uv pip install -e .
+```
+
+- **`--active`** is required so packages go into **`/opt/venv`**. A plain **`uv sync`** (without `--active`) targets **`.venv/`** under the project root and will ignore `VIRTUAL_ENV=/opt/venv`, which duplicates the environment.
+- **RoboCasa** extra (if your image was built with it, or you need those deps): add **`--extra robocasa`** to the `uv sync` line.
+- If you see **hardlink** warnings (cache vs workspace on different filesystems), set **`export UV_LINK_MODE=copy`** before `uv sync`.
+- Optional: remove a stray project venv with **`rm -rf .venv`** if you do not want a local `.venv`.
+
 ### Option B: Conda (Local)
 
 Create a python3 conda environment (tested with Python 3.10) and run the following:

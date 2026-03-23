@@ -4,12 +4,9 @@
 ARG CUDA_VERSION=11.8
 FROM nvidia/cuda:${CUDA_VERSION}.0-cudnn8-devel-ubuntu20.04
 ARG INCLUDE_ROBOCASA=0
-ARG ENV_NAME=droid_env
 
 # Basic env
 ENV DEBIAN_FRONTEND=noninteractive
-ENV MAMBA_ROOT_PREFIX=/opt/conda
-ENV PATH=/opt/conda/bin:$PATH
 ENV LC_ALL=C.UTF-8
 ENV LANG=C.UTF-8
 
@@ -28,24 +25,20 @@ RUN if [ "${INCLUDE_ROBOCASA}" = "1" ]; then \
     && rm -rf /var/lib/apt/lists/*; fi
 
 # -----------------------------------------------------------------------------
-# 2. Micromamba
+# 2. uv (Python package manager)
 # -----------------------------------------------------------------------------
-RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | \
-    tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
 # -----------------------------------------------------------------------------
-# 3. Python environment (3.10)
+# 3. Python venv (3.10) via uv
 # -----------------------------------------------------------------------------
-RUN micromamba create -y -n ${ENV_NAME} python=3.10.* -c conda-forge && micromamba clean -a -y
-RUN micromamba shell init --shell bash
-RUN echo '' >> /root/.bashrc && \
-    echo '# Micromamba' >> /root/.bashrc && \
-    echo 'if [ -f /opt/conda/etc/profile.d/mamba.sh ]; then . /opt/conda/etc/profile.d/mamba.sh; fi' >> /root/.bashrc && \
-    echo "micromamba activate ${ENV_NAME}" >> /root/.bashrc
-RUN echo 'if [ -f ~/.bashrc ]; then . ~/.bashrc; fi' >> /root/.bash_profile
+RUN uv venv --python 3.10 /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv"
 
 # -----------------------------------------------------------------------------
-# 4. Third-party: Octo
+# 4. Third-party: Octo (not on PyPI; installed after locked deps)
 # -----------------------------------------------------------------------------
 WORKDIR /opt/third_party
 RUN git clone https://github.com/octo-models/octo.git && \
@@ -53,49 +46,31 @@ RUN git clone https://github.com/octo-models/octo.git && \
 
 RUN if [ "${INCLUDE_ROBOCASA}" = "1" ]; then \
     cd /opt/third_party && git clone https://github.com/ARISE-Initiative/robosuite.git robosuite && \
-    cd robosuite && git checkout v1.5.2 && micromamba run -n ${ENV_NAME} pip install -e .; fi
+    cd robosuite && git checkout v1.5.2 && uv pip install -e .; fi
 
 # -----------------------------------------------------------------------------
-# 5. PyTorch & JAX (GPU)
+# 5. Locked runtime stack (PyTorch cu118, JAX CUDA, TF, etc.) via uv sync
 # -----------------------------------------------------------------------------
-RUN micromamba run -n ${ENV_NAME} pip install --upgrade pip
-RUN micromamba run -n ${ENV_NAME} pip install \
-    torch==2.0.1+cu118 torchvision==0.15.2+cu118 \
-    --extra-index-url https://download.pytorch.org/whl/cu118
-RUN micromamba run -n ${ENV_NAME} pip install --upgrade \
-    "jax[cuda11_pip]==0.4.20" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+WORKDIR /build
+COPY pyproject.toml uv.lock ./
 
-# -----------------------------------------------------------------------------
-# 6. Python dependencies (Droid + Octo)
-# -----------------------------------------------------------------------------
-RUN micromamba run -n ${ENV_NAME} pip install cmake
-RUN micromamba run -n ${ENV_NAME} pip install \
-    "numpy==1.24.3" "protobuf>=3.20.3,<4.25" h5py psutil tqdm termcolor tensorboard tensorboardX \
-    imageio imageio-ffmpeg matplotlib "diffusers==0.11.1" opencv-python "transformers==4.34.0" \
-    gym "ml_dtypes==0.2.0" "chex==0.1.85" "optax==0.1.5" "tensorflow_probability==0.23.0" \
-    "tensorflow==2.15.0" "distrax==0.1.5" "flax==0.7.5" ml_collections absl-py scipy \
-    wandb einops moviepy "pre-commit==3.3.3" tensorflow_hub tensorflow_text \
-    "tensorflow_datasets==4.9.2" "tensorflow_graphics==2021.12.3" \
-    "dlimp @ git+https://github.com/kvablack/dlimp@5edaa4691567873d495633f2708982b42edf1972" \
-    plotly "hydra-core>=1.1.0"
-
-RUN micromamba run -n ${ENV_NAME} bash -c \
-    "export CMAKE_POLICY_VERSION_MINIMUM=3.5 && pip install --no-build-isolation 'egl_probe>=1.0.1'"
-
+# Sync into /opt/venv (--active). CMAKE_POLICY_VERSION_MINIMUM for egl_probe builds.
+# Optional Robocasa stack: `uv sync --extra robocasa` (numba/protobuf resolved in uv.lock).
 RUN if [ "${INCLUDE_ROBOCASA}" = "1" ]; then \
-    micromamba run -n ${ENV_NAME} pip install \
-        "numba==0.56.4" "mujoco==3.2.6" pygame Pillow pyyaml pynput lxml hidapi \
-        "tianshou==0.4.10" "policy-websocket @ git+https://github.com/YufengJin/policy_websocket.git"; fi
+      CMAKE_POLICY_VERSION_MINIMUM=3.5 uv sync --frozen --no-install-project --active --extra robocasa; \
+    else \
+      CMAKE_POLICY_VERSION_MINIMUM=3.5 uv sync --frozen --no-install-project --active; \
+    fi
 
 ENV INCLUDE_ROBOCASA=${INCLUDE_ROBOCASA}
 
 # -----------------------------------------------------------------------------
-# 7. Octo package
+# 6. Octo package (editable)
 # -----------------------------------------------------------------------------
-RUN micromamba run -n ${ENV_NAME} pip install -e /opt/third_party/octo
+RUN uv pip install -e /opt/third_party/octo
 
 # -----------------------------------------------------------------------------
-# 8. Workspace (project mounted at runtime; entrypoint does pip install -e .)
+# 7. Workspace (project mounted at runtime; entrypoint does pip install -e .)
 # -----------------------------------------------------------------------------
 WORKDIR /workspace/droid_policy_learning
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
