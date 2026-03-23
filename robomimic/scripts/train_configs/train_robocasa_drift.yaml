@@ -1,0 +1,21 @@
+# ============================================================================
+# Drift Policy config for RoboCasa (extends train_robocasa)
+# ============================================================================
+# Usage:
+#   python -m robomimic.scripts.train_robocasa --config-name train_robocasa_drift
+#   python -m robomimic.scripts.train_robocasa --config-name train_robocasa_drift debug=true
+# ============================================================================
+
+defaults:
+  - train_robocasa
+
+algo_name: drift_policy
+
+algo:
+  noise_samples: 1
+  ddim:
+    num_inference_timesteps: 1
+  drift:
+    temp: 0.05
+    max_drift: 0.1
+    use_adaptive_temp: true

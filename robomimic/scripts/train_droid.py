@@ -410,6 +410,18 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
         print("")
         flush_warnings()
 
+    if is_main and debug:
+        from robomimic.utils.debug_training_sample import dump_training_batch_debug
+        if ds_format == "droid_rlds":
+            _dbg_batch = rlds_batch
+            _dbg_tag = "train_droid_rlds"
+        else:
+            _dbg_batch = next(iter(train_loader))
+            _dbg_tag = "train_droid_hdf5"
+        _dbg_path = dump_training_batch_debug(_dbg_batch, log_dir, _dbg_tag)
+        if _dbg_path:
+            print("\n============= [DEBUG] Saved sample dump: {} =============\n".format(_dbg_path))
+
     for epoch in range(start_epoch, config.train.num_epochs + 1):
         if use_ddp and hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)

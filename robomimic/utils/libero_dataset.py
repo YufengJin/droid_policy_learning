@@ -9,7 +9,8 @@ Reference: cosmos_policy/datasets/libero_dataset.py
 HDF5 layout:
     data/{demo}/obs/agentview_rgb[_jpeg]       (T, H, W, 3) or JPEG bytes
     data/{demo}/obs/eye_in_hand_rgb[_jpeg]
-    data/{demo}/obs/robot_states               (T, 9)
+    data/{demo}/obs/robot_states               (T, 9)   # preferred
+    data/{demo}/robot_states                   (T, 9)   # some exports (e.g. libero_10) use demo root
     data/{demo}/actions                        (T, 7)
 """
 
@@ -71,6 +72,8 @@ class LIBERODataset(torch.utils.data.Dataset):
         filter_key=None,
         image_size=None,
         normalize_actions=True,
+        dataset_statistics_path=None,
+        max_demos=None,
     ):
         """
         Args:
@@ -85,6 +88,9 @@ class LIBERODataset(torch.utils.data.Dataset):
             filter_key (str | None): "train" or "valid" to select demos.
             image_size (tuple | None): (H, W) target for image resizing.
             normalize_actions (bool): Whether to normalise actions to [-1, 1].
+            dataset_statistics_path (str | None): If set, load/save ``dataset_statistics.json``
+                at this path instead of under ``data_dir`` (for read-only dataset roots).
+            max_demos (int | None): If set, load at most this many demos (debug / smoke tests).
         """
         super().__init__()
 
@@ -98,6 +104,8 @@ class LIBERODataset(torch.utils.data.Dataset):
         self.action_config = action_config or {}
         self.image_size = image_size
         self.normalize_actions = normalize_actions
+        self._dataset_statistics_path = dataset_statistics_path
+        self._max_demos = max_demos
 
         # ------------------------------------------------------------------
         # Discover HDF5 files
@@ -136,6 +144,22 @@ class LIBERODataset(torch.utils.data.Dataset):
 
                 for dk in demo_keys:
                     obs_group = f["data/{}/obs".format(dk)]
+                    demo_group = f["data/{}".format(dk)]
+
+                    robot_states_arr = None
+
+                    def _get_robot_states():
+                        nonlocal robot_states_arr
+                        if robot_states_arr is None:
+                            if "robot_states" in obs_group:
+                                robot_states_arr = obs_group["robot_states"][:]
+                            elif "robot_states" in demo_group:
+                                robot_states_arr = demo_group["robot_states"][:]
+                            else:
+                                raise KeyError(
+                                    "robot_states not under obs/ or demo root in {}/data/{}".format(fpath, dk)
+                                )
+                        return robot_states_arr
 
                     obs_dict = {}
                     for obs_key in self.obs_keys:
@@ -149,13 +173,13 @@ class LIBERODataset(torch.utils.data.Dataset):
                                 raise KeyError("Neither '{}' nor '{}' found in {}".format(raw_key, jpeg_key, fpath))
                             obs_dict[obs_key] = imgs.astype(np.uint8)
                         elif obs_key == "robot_states":
-                            obs_dict[obs_key] = obs_group["robot_states"][:].astype(np.float32)
+                            obs_dict[obs_key] = _get_robot_states().astype(np.float32)
                         elif obs_key == "robot0_eef_pos":
-                            obs_dict[obs_key] = obs_group["robot_states"][:, :3].astype(np.float32)
+                            obs_dict[obs_key] = _get_robot_states()[:, :3].astype(np.float32)
                         elif obs_key == "robot0_eef_quat":
-                            obs_dict[obs_key] = obs_group["robot_states"][:, 3:7].astype(np.float32)
+                            obs_dict[obs_key] = _get_robot_states()[:, 3:7].astype(np.float32)
                         elif obs_key == "robot0_gripper_qpos":
-                            obs_dict[obs_key] = obs_group["robot_states"][:, 7:9].astype(np.float32)
+                            obs_dict[obs_key] = _get_robot_states()[:, 7:9].astype(np.float32)
                         else:
                             if obs_key in obs_group:
                                 obs_dict[obs_key] = obs_group[obs_key][:].astype(np.float32)
@@ -170,6 +194,10 @@ class LIBERODataset(torch.utils.data.Dataset):
                     self._obs_data[demo_idx] = obs_dict
                     self._action_data[demo_idx] = actions
                     demo_idx += 1
+                    if self._max_demos is not None and demo_idx >= self._max_demos:
+                        break
+                if self._max_demos is not None and demo_idx >= self._max_demos:
+                    break
 
         if len(self.demos) == 0:
             raise RuntimeError("No demonstrations loaded from {}".format(data_dir))
@@ -185,6 +213,7 @@ class LIBERODataset(torch.utils.data.Dataset):
                            "proprio": self._obs_data[i].get("robot_states",
                                        np.zeros((self.demo_lengths[i], self.PROPRIO_DIM), dtype=np.float32))}
                        for i in range(len(self.demos))},
+                stats_path=self._dataset_statistics_path,
             )
             a_min = self._dataset_stats["actions_min"]
             a_max = self._dataset_stats["actions_max"]

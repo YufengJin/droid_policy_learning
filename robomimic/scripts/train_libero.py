@@ -16,12 +16,20 @@ Usage:
   python -m robomimic.scripts.train_libero
 
 Config 通过 Hydra 从 robomimic/scripts/train_configs/train_libero.yaml 读取。
+
+Debug（debug=true）时为避免整库载入导致 OOM（进程被 Killed）：
+  - 默认在配置路径下存在子目录 ``libero_10`` 时只使用该子目录；
+  - 或通过环境变量 ``LIBERO_DEBUG_DATA_DIR`` 指定小数据目录；
+  - ``dataset_statistics.json`` 写到 ``/tmp/libero_dataset_cache/``（只读数据盘也可跑）；
+  - 默认最多载入 ``LIBERO_DEBUG_MAX_DEMOS``（默认 16）个 demo，可加大或设为更大整数。
 """
 
+import hashlib
 import json
 import os
 import signal
 import sys
+import tempfile
 import traceback
 import datetime
 import psutil
@@ -136,9 +144,9 @@ def get_config_from_args():
         config.lock_keys()
         config.experiment.epoch_every_n_steps = 3
         config.experiment.validation_epoch_every_n_steps = 3
-        config.train.num_epochs = 200
+        config.train.num_epochs = 20
         config.experiment.mse.every_n_epochs = 2
-        config.experiment.save.every_n_epochs = 1
+        config.experiment.save.every_n_epochs = 10
         config.experiment.rollout.rate = 1
         config.experiment.rollout.n = 2
         config.experiment.rollout.horizon = 10
@@ -146,9 +154,47 @@ def get_config_from_args():
         config.experiment.logging.terminal_output_to_txt = True
         config.experiment.logging.log_tb = False
         config.experiment.logging.log_wandb = False
+        # Avoid loading full LIBERO tree + duplicate valid set (OOM / Killed on large roots).
+        config.experiment.validate = False
+        config.experiment.mse.enabled = False
+        config.train.num_data_workers = 0
+        if config.train.batch_size > 8:
+            config.train.batch_size = 8
 
     config.lock()
     return config, debug
+
+
+def _libero_debug_dataset_kwargs(debug, config_data_path):
+    """
+    When debug=True: prefer LIBERO_DEBUG_DATA_DIR, else libero_10 under config path if present;
+    write dataset_statistics.json under /tmp (read-only dataset mounts); cap demos via max_demos.
+    Returns dict with keys used by LIBERODataset (optional kwargs only when debug).
+    """
+    if not debug:
+        return {}
+    env_p = os.environ.get("LIBERO_DEBUG_DATA_DIR", "").strip()
+    if env_p:
+        data_dir = os.path.expanduser(env_p)
+    else:
+        data_dir = os.path.expanduser(config_data_path)
+        if os.path.isdir(data_dir):
+            sub = os.path.join(data_dir, "libero_10")
+            if os.path.isdir(sub):
+                data_dir = sub
+    cache_root = os.path.join(tempfile.gettempdir(), "libero_dataset_cache")
+    os.makedirs(cache_root, exist_ok=True)
+    sig = hashlib.md5(os.path.abspath(data_dir).encode("utf-8")).hexdigest()[:16]
+    stats_path = os.path.join(cache_root, "dataset_statistics_{}.json".format(sig))
+    try:
+        max_demos = max(1, int(os.environ.get("LIBERO_DEBUG_MAX_DEMOS", "16")))
+    except ValueError:
+        max_demos = 16
+    return {
+        "_resolved_data_dir": data_dir,
+        "dataset_statistics_path": stats_path,
+        "max_demos": max_demos,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +229,21 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
     # Load LIBERO dataset
     # -----------------------------------------------------------------------
     eval_dataset_cfg = config.train.data[0]
-    data_dir = os.path.expanduser(eval_dataset_cfg["path"])
+    config_data_path = eval_dataset_cfg["path"]
+    if debug:
+        dbg_ds_kw = _libero_debug_dataset_kwargs(True, config_data_path)
+        data_dir = dbg_ds_kw.pop("_resolved_data_dir")
+        if is_main:
+            print(
+                "[debug] LIBERO data_dir={} max_demos={} dataset_statistics_path={}".format(
+                    data_dir,
+                    dbg_ds_kw.get("max_demos"),
+                    dbg_ds_kw.get("dataset_statistics_path"),
+                )
+            )
+    else:
+        data_dir = os.path.expanduser(config_data_path)
+        dbg_ds_kw = {}
     if not os.path.exists(data_dir):
         raise FileNotFoundError("Dataset at provided path {} not found!".format(data_dir))
 
@@ -211,6 +271,7 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
         filter_key=config.train.hdf5_filter_key,
         image_size=image_size,
         normalize_actions=True,
+        **dbg_ds_kw,
     )
 
     validset = None
@@ -229,6 +290,7 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
                 filter_key=hdf5_validation_filter_key,
                 image_size=image_size,
                 normalize_actions=True,
+                **dbg_ds_kw,
             )
         except Exception as e:
             if is_main:
@@ -249,7 +311,9 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
     sample = trainset[0]
     all_shapes = OrderedDict()
     for k, v in sample["obs"].items():
-        all_shapes[k] = list(v.shape[1:]) if len(v.shape) > 1 else list(v.shape)
+        modality = ObsUtils.OBS_KEYS_TO_MODALITIES[k]
+        tail_shape = tuple(v.shape[1:])
+        all_shapes[k] = ObsUtils.get_processed_shape(obs_modality=modality, input_shape=tail_shape)
     ac_dim = sample["actions"].shape[-1]
     shape_meta = {
         "all_shapes": all_shapes,
@@ -323,6 +387,13 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
         print(model.module if use_ddp else model)
         print("")
         flush_warnings()
+
+    if is_main and debug:
+        from robomimic.utils.debug_training_sample import dump_training_batch_debug
+        _dbg_batch = next(iter(train_loader))
+        _dbg_path = dump_training_batch_debug(_dbg_batch, log_dir, "train_libero")
+        if _dbg_path:
+            print("\n============= [DEBUG] Saved sample dump: {} =============\n".format(_dbg_path))
 
     # -----------------------------------------------------------------------
     # Training loop

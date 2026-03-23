@@ -1,0 +1,21 @@
+# ============================================================================
+# Drift Policy config for RLDS/DROID (extends train_rlds)
+# ============================================================================
+# Usage:
+#   python -m robomimic.scripts.train_droid --config-name train_rlds_drift
+#   python -m robomimic.scripts.train_droid --config-name train_rlds_drift debug=true
+# ============================================================================
+
+defaults:
+  - train_rlds
+
+algo_name: drift_policy
+
+algo:
+  noise_samples: 1
+  ddim:
+    num_inference_timesteps: 1
+  drift:
+    temp: 0.05
+    max_drift: 0.1
+    use_adaptive_temp: true

@@ -24,9 +24,8 @@ services:
       - ..:/workspace/droid_policy_learning
       - /home/yjin/localdisk/droid/:/workspace/datasets/droid:ro
       - /home/yjin/localdisk/robocasa/:/workspace/datasets/robocasa:ro
+      - /home/yjin/repos/LIBERO/libero/datasets/:/workspace/datasets/libero:ro
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
-      - /home/yjin/repos/cosmos-policy/:/workspace/cosmos-policy:ro
-      - /home/yjin/repos/robocasa/:/workspace/robocasa:ro
 
     command: tail -f /dev/null
 

@@ -22,7 +22,7 @@
 docker exec <container_name> nvidia-smi
 
 # 检查 PyTorch GPU 访问
-docker exec <container_name> micromamba run -n droid_env python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}')"
+docker exec <container_name> python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}')"
 ```
 
 ### 预期输出
@@ -249,10 +249,10 @@ ulimits:
 docker exec <container_name> nvidia-smi
 
 # 2. 检查 PyTorch
-docker exec <container_name> micromamba run -n droid_env python -c "import torch; assert torch.cuda.is_available(), 'GPU not available!'; print('✅ PyTorch GPU: OK')"
+docker exec <container_name> python -c "import torch; assert torch.cuda.is_available(), 'GPU not available!'; print('✅ PyTorch GPU: OK')"
 
 # 3. 检查 CUDA 版本
-docker exec <container_name> micromamba run -n droid_env python -c "import torch; print(f'PyTorch CUDA: {torch.version.cuda}')"
+docker exec <container_name> python -c "import torch; print(f'PyTorch CUDA: {torch.version.cuda}')"
 
 # 4. 检查共享内存（如果使用 ipc: host，应该显示主机内存）
 docker exec <container_name> df -h /dev/shm

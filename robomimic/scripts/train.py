@@ -353,6 +353,10 @@ def train(config, device, debug=False):
         print("\n============= [DEBUG] Data batch: keys, shapes, dtypes =============\n")
         _print_batch_shape_dtype(_sample_batch, "batch")
         print("\n====================================================================\n")
+        from robomimic.utils.debug_training_sample import dump_training_batch_debug
+        _dbg_path = dump_training_batch_debug(_sample_batch, log_dir, "train_py")
+        if _dbg_path:
+            print("\n============= [DEBUG] Saved sample dump: {} =============\n".format(_dbg_path))
 
     data_loader_iter = iter(train_loader)
     for epoch in range(1, config.train.num_epochs + 1): # epoch numbers start at 1

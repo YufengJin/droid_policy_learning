@@ -18,6 +18,7 @@ services:
       - ..:/workspace/droid_policy_learning
       - /home/yjin/localdisk/droid/:/workspace/datasets/droid:ro
       - /home/yjin/localdisk/robocasa/:/workspace/datasets/robocasa:ro
+      - /home/yjin/repos/LIBERO/libero/datasets/:/workspace/datasets/libero:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${HOME}/.Xauthority:/root/.Xauthority:rw
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface

@@ -1,10 +1,33 @@
-# Train configs for RLDS (Hydra)
+# Train configs (Hydra)
 
-This directory holds Hydra configs used by `train_rlds.py` for RLDS (droid_rlds) training.
+This directory holds Hydra configs for training scripts.
 
 ## Files
 
-- **`train_rlds.yaml`** – Default config for `train_rlds.py` (diffusion_policy + droid_rlds).
+- **`train_robocasa.yaml`** – RoboCasa HDF5 training (diffusion_policy).
+- **`train_robocasa_drift.yaml`** – Drift policy for RoboCasa (extends train_robocasa).
+- **`train_rlds.yaml`** – Default config for `train_droid.py` (diffusion_policy + droid_rlds).
+- **`train_rlds_drift.yaml`** – Drift policy for RLDS/DROID (extends train_rlds).
+- **`train_libero.yaml`** – LIBERO HDF5 training (`train_libero.py`).
+- **`train_aloha.yaml`** – ALOHA training (`train_aloha.py`).
+
+## Model comparison (diffusion vs drift)
+
+Switch algorithms via `algo_name` or config file:
+
+```bash
+# Diffusion policy (default)
+python -m robomimic.scripts.train_robocasa
+python -m robomimic.scripts.train_droid
+
+# Drift policy (1-NFE inference, drift training loss)
+python -m robomimic.scripts.train_robocasa algo_name=drift_policy
+python -m robomimic.scripts.train_droid algo_name=drift_policy
+
+# Or use dedicated config files
+python -m robomimic.scripts.train_robocasa --config-name train_robocasa_drift
+python -m robomimic.scripts.train_droid --config-name train_rlds_drift
+```
 
 ## Usage with `train_rlds.py`
 
@@ -65,3 +88,25 @@ python -m robomimic.scripts.train_rlds debug=true
 - **`debug`** (bool): `true` for a short debug run (few steps/epochs, `/tmp` output).
 
 All other keys (e.g. `train.data_path`, `train.dataset_names`, `experiment.name`) follow the structure of `train_rlds.yaml` and can be overridden from the CLI.
+
+## Debug sample dump (`debug=true` / `--debug`)
+
+When debug mode is enabled, **rank 0** writes **one** training batch to disk for inspection (shapes, dtypes, and representative values). Implementation: `robomimic/utils/debug_training_sample.py` (`dump_training_batch_debug`).
+
+- **Output directory**: `{log_dir}/debug_sample/{source_tag}/`
+  - `log_dir` is the run’s logs folder (same as `TrainUtils.get_exp_dir`: `{output_dir}/{experiment_name}/{timestamp}/logs`).
+- **`debug_report.json`**: nested tree mirroring the batch; each leaf records `key_path`, `type`, `shape`/`dtype` where applicable, and the filename of any saved artifact.
+- **Artifacts**: image-like `ndarray` / tensors → `.png`; numeric arrays → `.txt` (`np.savetxt` for 1D/2D) or `*_summary.txt` for higher rank; strings/bytes → `.txt`.
+- **Once per `(log_dir, source_tag)`**: a process-local guard plus on-disk marker `.dump_complete` prevents duplicate dumps in the same folder. To dump again, use a new experiment directory (new timestamp / name).
+
+**`source_tag` by entry script**
+
+| Script | `source_tag` |
+|--------|----------------|
+| `robomimic/scripts/train.py` | `train_py` |
+| `robomimic/scripts/train_libero.py` | `train_libero` |
+| `robomimic/scripts/train_robocasa.py` | `train_robocasa` |
+| `robomimic/scripts/train_droid.py` (RLDS) | `train_droid_rlds` |
+| `robomimic/scripts/train_droid.py` (HDF5) | `train_droid_hdf5` |
+
+Classic training uses `--debug` instead of Hydra `debug=true`.

@@ -8,8 +8,91 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 
+from PIL import Image
+
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
+
+
+def _chw_to_hwc_uint8(x: np.ndarray) -> np.ndarray:
+    """Single frame (C, H, W) -> (H, W, 3) uint8 for PNG."""
+    x = np.asarray(x)
+    if x.ndim != 3:
+        raise ValueError("expected CHW with ndim=3, got shape {}".format(x.shape))
+    c, h, w = x.shape
+    if c == 1:
+        x = np.repeat(x, 3, axis=0)
+    elif c == 4:
+        x = x[:3]
+    elif c != 3:
+        raise ValueError("expected C in {{1,3,4}}, got C={}".format(c))
+    x = np.transpose(x, (1, 2, 0))
+    if x.dtype in (np.float32, np.float64):
+        if np.nanmax(x) <= 1.0 + 1e-3:
+            x = np.clip(x * 255.0, 0, 255).astype(np.uint8)
+        else:
+            x = np.clip(x, 0, 255).astype(np.uint8)
+    elif x.dtype != np.uint8:
+        x = np.clip(x.astype(np.float64), 0, 255).astype(np.uint8)
+    return x
+
+def save_bchw_images_to_tmp(images, prefix="obs", out_dir="/tmp"):
+    """
+    Save a batch of channel-first images ``(B, C, H, W)`` as PNGs under ``out_dir`` (default ``/tmp``).
+
+    Typical use: ``C=3`` (RGB). Also supports ``C in {1, 4}`` (grayscale repeated to RGB, or RGBA -> RGB).
+    Accepts ``torch.Tensor`` or ``numpy.ndarray``. Float in ~[0, 1] is scaled to uint8; else clipped to [0, 255].
+
+    Args:
+        images: shape (B, C, H, W)
+        prefix: filename prefix
+        out_dir: output directory (created if missing)
+
+    Returns:
+        list of str: absolute paths ``{prefix}_b{i}.png`` for ``i = 0 .. B-1``.
+    """
+    x = TensorUtils.to_numpy(images)
+    if x.ndim != 4:
+        raise ValueError("expected shape (B, C, H, W), got {}".format(x.shape))
+    os.makedirs(out_dir, exist_ok=True)
+    saved = []
+    b = x.shape[0]
+    for bi in range(b):
+        hwc = _chw_to_hwc_uint8(x[bi])
+        fname = os.path.join(out_dir, "{}_b{}.png".format(prefix, bi))
+        Image.fromarray(hwc).save(fname)
+        saved.append(os.path.abspath(fname))
+    return saved
+
+
+def save_btchw_images_to_tmp(images, prefix="obs", out_dir="/tmp"):
+    """
+    Save a batch of image sequences (B, T, C, H, W) as PNGs under ``out_dir`` (default ``/tmp``).
+
+    Accepts ``torch.Tensor`` or ``numpy.ndarray``. Assumes channel-first (C, H, W) per frame.
+    Float in ~[0, 1] is scaled to uint8; else clipped to [0, 255].
+
+    Args:
+        images: shape (B, T, C, H, W)
+        prefix: filename prefix
+        out_dir: directory to write into (created if missing)
+
+    Returns:
+        list of str: absolute paths ``{prefix}_b{bi}_t{ti}.png`` for each (bi, ti).
+    """
+    x = TensorUtils.to_numpy(images)
+    if x.ndim != 5:
+        raise ValueError("expected shape (B, T, C, H, W), got {}".format(x.shape))
+    os.makedirs(out_dir, exist_ok=True)
+    saved = []
+    b, t = x.shape[0], x.shape[1]
+    for bi in range(b):
+        for ti in range(t):
+            hwc = _chw_to_hwc_uint8(x[bi, ti])
+            fname = os.path.join(out_dir, "{}_b{}_t{}.png".format(prefix, bi, ti))
+            Image.fromarray(hwc).save(fname)
+            saved.append(os.path.abspath(fname))
+    return saved
 
 
 def image_tensor_to_numpy(image):

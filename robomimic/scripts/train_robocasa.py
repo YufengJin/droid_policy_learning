@@ -23,7 +23,7 @@ Usage:
   torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa load_from=/path/to/config.json
 
   # 在 docker 中运行
-  docker exec -it -w /workspace/droid_policy_learning droid-dev-headless micromamba run -n droid_env python -m robomimic.scripts.train_robocasa
+  docker exec -it -w /workspace/droid_policy_learning droid-dev-headless python -m robomimic.scripts.train_robocasa
 
 Config 通过 Hydra 从 robomimic/scripts/train_configs/train_robocasa.yaml 读取。
 """
@@ -154,9 +154,22 @@ def get_config_from_args():
     if not os.path.isdir(config_dir):
         raise FileNotFoundError("Config directory not found: {}".format(config_dir))
     overrides = list(sys.argv[1:])
+    config_name = "train_robocasa"
+    overrides_filtered = []
+    i = 0
+    while i < len(overrides):
+        o = overrides[i]
+        if o.startswith("config_name=") or o.startswith("--config-name="):
+            config_name = o.split("=", 1)[1].strip()
+        elif o in ("--config-name", "-cn") and i + 1 < len(overrides):
+            config_name = overrides[i + 1].strip()
+            i += 1
+        else:
+            overrides_filtered.append(o)
+        i += 1
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=os.path.abspath(config_dir), version_base="1.1"):
-        cfg = compose(config_name="train_robocasa", overrides=overrides)
+        cfg = compose(config_name=config_name, overrides=overrides_filtered)
 
     # 可选：从 JSON 加载完整配置（覆盖上述 YAML）
     load_from = OmegaConf.select(cfg, "load_from")
@@ -617,6 +630,13 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         print(model.module if use_ddp else model)
         print("")
         flush_warnings()
+
+    if is_main and debug:
+        from robomimic.utils.debug_training_sample import dump_training_batch_debug
+        _dbg_batch = next(iter(train_loader))
+        _dbg_path = dump_training_batch_debug(_dbg_batch, log_dir, "train_robocasa")
+        if _dbg_path:
+            print("\n============= [DEBUG] Saved sample dump: {} =============\n".format(_dbg_path))
 
     # -----------------------------------------------------------------------
     # 训练循环：每 epoch 跑 train / valid / 可选 rollout / MSE / 保存
