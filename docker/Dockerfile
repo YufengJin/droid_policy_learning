@@ -29,6 +29,8 @@ RUN if [ "${INCLUDE_ROBOCASA}" = "1" ]; then \
 # -----------------------------------------------------------------------------
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
+# 运行时常见把宿主机目录 bind 到 /root，会遮住镜像内 /root/.local/bin；复制 uv 到 PATH 固定位置
+RUN cp /root/.local/bin/uv /usr/local/bin/uv && chmod +x /usr/local/bin/uv
 
 # -----------------------------------------------------------------------------
 # 3. Python venv (3.10) via uv
@@ -36,6 +38,16 @@ ENV PATH="/root/.local/bin:$PATH"
 RUN uv venv --python 3.10 /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
+# uv 把 Python 装在 /root/.local/share/uv/python/...；bind /root 时软链接失效。
+# 复制到 /opt/python310 并重链，保证任何 bind 场景下 venv Python 可用。
+RUN _py=$(find /root/.local/share/uv/python -maxdepth 3 -name 'python3.10' -type f 2>/dev/null | head -1) && \
+    if [ -n "$_py" ]; then \
+        _dir=$(dirname "$(dirname "$_py")") && \
+        cp -a "$_dir" /opt/python310 && \
+        ln -sf /opt/python310/bin/python3.10 /opt/venv/bin/python && \
+        ln -sf /opt/python310/bin/python3.10 /opt/venv/bin/python3 && \
+        ln -sf /opt/python310/bin/python3.10 /opt/venv/bin/python3.10; \
+    fi
 
 # -----------------------------------------------------------------------------
 # 4. Third-party: Octo (not on PyPI; installed after locked deps)

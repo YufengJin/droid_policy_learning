@@ -82,6 +82,12 @@ docker run --rm --gpus all \
   droid-policy:latest python -c "print('hello')"
 ```
 
+## Apptainer / HPC（与 SLURM 脚本）
+
+- 镜像内 Python 与依赖在 **`/opt/venv`**；训练入口为 **`docker/entrypoint.sh`**（复制到 `/usr/local/bin/entrypoint.sh`）。
+- 若在 Apptainer 里把**宿主机目录绑定到 `/root`**（例如持久化 cache），会遮住镜像里的 `/root/.local/bin`。Dockerfile 已把 **`uv` 复制到 `/usr/local/bin`**，entrypoint 优先依赖该路径，避免 `uv: command not found`。
+- 拉取的 Hub 镜像若**不是**用本仓库 `docker/Dockerfile` 构建，可能没有 `/opt/venv`；需自行 build/push 后再 `apptainer pull`。
+
 ## Entrypoint
 
 On each start:

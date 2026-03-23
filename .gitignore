@@ -23,6 +23,7 @@ venv/
 .env
 .env.*
 !.env.example
+slurm/.env.wandb
 
 # Build / packaging
 *.egg-info/
@@ -31,3 +32,7 @@ dist/
 build/
 
 outputs/
+logs/
+*.sif
+
+.claude/

@@ -1,8 +1,11 @@
 #!/bin/bash
 set -e
 
-export PATH="/opt/venv/bin:/usr/local/bin:${PATH:-/usr/bin:/bin}"
+# uv 安装在 /root/.local/bin（见 Dockerfile）；缺了会导致 runtime editable install 报 uv: not found
+# /usr/local/bin 含构建阶段复制的 uv（见 Dockerfile）；bind 覆盖 /root 时仍可用
+export PATH="/opt/venv/bin:/usr/local/bin:/root/.local/bin:${PATH:-/usr/bin:/bin}"
 export VIRTUAL_ENV="/opt/venv"
+PY="${PY:-/opt/venv/bin/python}"
 
 # Editable install (project mounted at /workspace/droid_policy_learning)
 if [ -f "/workspace/droid_policy_learning/pyproject.toml" ]; then
@@ -21,12 +24,12 @@ if [ "${INCLUDE_ROBOCASA}" = "1" ] && [ -f "/workspace/droid_policy_learning/ben
     ROBOCASA_ASSETS="${ROBOCASA_ASSETS:-/workspace/droid_policy_learning/benchmarks/robocasa/robocasa/models/assets}"
     if [ ! -d "${ROBOCASA_ASSETS}/textures" ] || [ -z "$(ls -A "${ROBOCASA_ASSETS}/textures" 2>/dev/null)" ]; then
         echo ">> Downloading robocasa kitchen assets (~5GB)..."
-        yes | python /workspace/droid_policy_learning/benchmarks/robocasa/robocasa/scripts/download_kitchen_assets.py
+        yes | "$PY" /workspace/droid_policy_learning/benchmarks/robocasa/robocasa/scripts/download_kitchen_assets.py
     fi
 
-    if ! python -c "import robocasa.macros_private" 2>/dev/null; then
+    if ! "$PY" -c "import robocasa.macros_private" 2>/dev/null; then
         echo ">> Setting up robocasa macros..."
-        python /workspace/droid_policy_learning/benchmarks/robocasa/robocasa/scripts/setup_macros.py
+        "$PY" /workspace/droid_policy_learning/benchmarks/robocasa/robocasa/scripts/setup_macros.py
     fi
 fi
 

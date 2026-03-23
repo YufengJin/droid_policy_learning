@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name=train_libero
+#SBATCH --job-name=train_droid
 #SBATCH --partition=a100
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=8
@@ -35,26 +35,24 @@ export MKL_NUM_THREADS=1
 export nointeractive=yes
 
 ################################################################################
-# 4) LIBERO 数据路径（直接使用源目录，不复制到 TMPDIR）
-#    覆盖：LIBERO_DATASET_DIR=/path/to/libero；LIBERO_SUBDIR=libero_10（子集，默认）
+# 4) DROID RLDS 数据路径（直接使用源目录，不复制到 TMPDIR）
+#    覆盖：export DROID_DATASET_DIR=/path/to/droid_rlds
 ################################################################################
 WORK_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning"
 PROJECT_ROOT="$WORK_DIR"
 OUTPUT_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning/outputs"
-DATA_ROOT="${LIBERO_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/libero}"
-LIBERO_SUBDIR="${LIBERO_SUBDIR:-libero_10}"
+DATA_ROOT="${DROID_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/droid}"
+# RLDS 子集，对应 train_rlds.yaml 中 dataset_names，如 [insert_pin]、[droid_100]
+DATASET_NAMES="${DROID_DATASET_NAMES:-insert_pin}"
 
 if [[ ! -d "$DATA_ROOT" ]]; then
-  echo "[ERR] LIBERO dataset not found: $DATA_ROOT"; exit 2
+  echo "[ERR] DROID dataset not found: $DATA_ROOT"; exit 2
 fi
-if [[ ! -d "$DATA_ROOT/$LIBERO_SUBDIR" ]]; then
-  echo "[ERR] LIBERO subdir not found: $DATA_ROOT/$LIBERO_SUBDIR"; exit 2
-fi
-echo "[$(date +'%F %T')] Using LIBERO dataset at $DATA_ROOT/$LIBERO_SUBDIR (no copy to TMPDIR)"
-ls -1 "$DATA_ROOT/$LIBERO_SUBDIR" | head -n 5 || { echo "[WARN] dataset layout check skipped"; }
+echo "[$(date +'%F %T')] Using DROID dataset at $DATA_ROOT (dataset_names=$DATASET_NAMES)"
+ls -1 "$DATA_ROOT" | head -n 5 || { echo "[WARN] dataset layout check skipped"; }
 
 ################################################################################
-# 5) Apptainer 配置（与 train_robocasa_app.slurm 一致）
+# 5) Apptainer 配置（与 train_libero_app.slurm / train_robocasa_app.slurm 一致）
 ################################################################################
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "${SCRIPT_DIR}/.env.wandb" ]] && source "${SCRIPT_DIR}/.env.wandb"
@@ -67,7 +65,7 @@ HOST_TMPDIR="${TMPDIR:-/tmp}"
 HOST_HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}"
 
 CONT_CODE_DIR="/workspace/droid_policy_learning"
-CONT_LIBERO="/workspace/datasets/libero"
+CONT_DROID="/workspace/datasets/droid"
 CONT_HF="/root/.cache/huggingface"
 
 if [[ ! -f "$CONTAINER_IMAGE" ]]; then
@@ -83,7 +81,7 @@ mkdir -p "$HOST_HF_CACHE" 2>/dev/null || true
 BIND_ARGS="-B ${HOST_CODE_DIR}:${CONT_CODE_DIR}"
 BIND_ARGS="$BIND_ARGS -B ${HOST_FAKE_ROOT}:/root"
 BIND_ARGS="$BIND_ARGS -B ${HOST_TMPDIR}:/tmp"
-BIND_ARGS="$BIND_ARGS -B ${DATA_ROOT}:${CONT_LIBERO}:ro"
+BIND_ARGS="$BIND_ARGS -B ${DATA_ROOT}:${CONT_DROID}:ro"
 [ -d "$HOST_HF_CACHE" ] && BIND_ARGS="$BIND_ARGS -B ${HOST_HF_CACHE}:${CONT_HF}"
 
 # wandb：-C 时需传入代理
@@ -92,39 +90,23 @@ BIND_ARGS="$BIND_ARGS -B ${DATA_ROOT}:${CONT_LIBERO}:ro"
 echo "[INFO] Apptainer bind mounts:"
 echo "  $HOST_CODE_DIR -> $CONT_CODE_DIR"
 echo "  $HOST_TMPDIR -> /tmp"
-echo "  $DATA_ROOT -> $CONT_LIBERO (ro)"
+echo "  $DATA_ROOT -> $CONT_DROID (ro)"
 [ -d "$HOST_HF_CACHE" ] && echo "  $HOST_HF_CACHE -> $CONT_HF"
 
 ################################################################################
-# 6) 启动训练（顺序 multirun：drift_policy、diffusion_policy 各一轮）
-#    数据路径：/workspace/datasets/libero/${LIBERO_SUBDIR}（默认 libero_10）
-#    覆盖：LIBERO_MULTIRUN=0 LIBERO_ALGO=drift_policy sbatch ... （单算法）
+# 6) 启动训练（train_droid 使用 train_rlds.yaml，RLDS 格式）
+#    覆盖：DROID_DATASET_NAMES="droid_100 role_ros2" 等
 ################################################################################
-CONT_LIBERO_SUB="${CONT_LIBERO}/${LIBERO_SUBDIR}"
-LIBERO_MULTIRUN="${LIBERO_MULTIRUN:-1}"
-LIBERO_ALGOS="${LIBERO_ALGOS:-drift_policy diffusion_policy}"
-LIBERO_ALGO="${LIBERO_ALGO:-diffusion_policy}"
-
 cd "$WORK_DIR"
 mkdir -p "$OUTPUT_DIR"
 
-if [[ "${LIBERO_MULTIRUN}" == "1" ]]; then
-  ALGO_LIST="$LIBERO_ALGOS"
-else
-  ALGO_LIST="$LIBERO_ALGO"
-fi
+echo "[INFO] Starting DROID training at $(date +'%F %T')"
 
-echo "[INFO] Starting LIBERO training at $(date +'%F %T') (MULTIRUN=$LIBERO_MULTIRUN: $ALGO_LIST, SUBDIR=$LIBERO_SUBDIR)"
-
-for algo in $ALGO_LIST; do
-  echo "[INFO] algo_name=$algo"
-  apptainer run --nv -C --writable-tmpfs --pwd "/workspace/droid_policy_learning" $BIND_ARGS "$CONTAINER_IMAGE" \
-    torchrun --nproc_per_node=4 -m robomimic.scripts.train_libero \
-    "train.data=[{path: ${CONT_LIBERO_SUB}}]" \
-    train.output_dir="/workspace/droid_policy_learning/outputs" \
-    train.batch_size=512 \
-    "algo_name=${algo}"
-  echo "[INFO] 完成 algo_name=$algo"
-done
+apptainer run --nv -C --writable-tmpfs --pwd "/workspace/droid_policy_learning" $BIND_ARGS "$CONTAINER_IMAGE" \
+  torchrun --nproc_per_node=4 -m robomimic.scripts.train_droid \
+  train.data_path="${CONT_DROID}" \
+  train.dataset_names="[${DATASET_NAMES}]" \
+  train.output_dir="/workspace/droid_policy_learning/outputs" \
+  train.batch_size=128
 
 echo "[INFO] Training completed at $(date +'%F %T')"
