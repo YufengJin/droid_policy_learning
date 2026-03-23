@@ -11,9 +11,8 @@ VISUALIZE_RANDOMIZER = False
 # wandb entity (eg. username or team name)
 WANDB_ENTITY = 'yufeng-jin'
 
-# wandb api key (obtain from https://wandb.ai/authorize)
-# alternatively, set up wandb from terminal with `wandb login`
-WANDB_API_KEY = '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'
+# wandb api key：勿提交真实 key。优先 `wandb login`；或在 macros_private.py 中设置。
+WANDB_API_KEY = None
 
 try:
     from robomimic.macros_private import *

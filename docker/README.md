@@ -89,6 +89,7 @@ On each start:
 1. Uses uv-managed venv at `/opt/venv` (Python 3.10)
 2. When `pyproject.toml` is present: `uv pip install -e .` (deps already synced in the image). Legacy `setup.py`-only trees use `uv pip install -e . --no-deps`
 3. If `INCLUDE_ROBOCASA=1`: installs Robocasa, downloads assets if needed, runs `setup_macros`
+4. If `INSTALL_CLAUDE_CODE=1`: installs [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/setup) (`claude`). Requires network. Run `claude` after install; use `claude login` on first use.
 
 ## Robocasa
 

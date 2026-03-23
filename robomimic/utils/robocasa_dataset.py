@@ -40,14 +40,14 @@ import torch.utils.data
 
 # ---------------------------------------------------------------------------
 # Cache root: /workspace/droid_policy_learning/.robocasa/
-#   data_statistics/   — dataset normalisation stats (JSON)
-#   lang_token/        — precomputed DistilBERT embeddings (pickle)
+#   lang_token/  — precomputed DistilBERT embeddings (pickle)
+# Dataset statistics: stored next to data (<data_dir>/dataset_statistics_<hash>.json)
+# or in /tmp/robomimic_dataset_cache/ when data_dir is read-only.
 # ---------------------------------------------------------------------------
 _ROBOCASA_CACHE_ROOT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     ".robocasa",
 )
-_ROBOCASA_STATS_CACHE_DIR = os.path.join(_ROBOCASA_CACHE_ROOT, "data_statistics")
 _ROBOCASA_LANG_CACHE_DIR = os.path.join(_ROBOCASA_CACHE_ROOT, "lang_token")
 
 from robomimic.utils.dataset_utils import (
@@ -227,6 +227,7 @@ class RoboCasaDataset(torch.utils.data.Dataset):
         image_size=None,
         normalize_actions=True,
         verbose=False,
+        dataset_statistics_path=None,
     ):
         """
         Args:
@@ -242,6 +243,10 @@ class RoboCasaDataset(torch.utils.data.Dataset):
             image_size (tuple | None): If provided, (H, W) to resize images.
             normalize_actions (bool): Whether to normalise actions to [-1, 1].
             verbose (bool): If True, print debug info (HDF5 files, first demo structure).
+            dataset_statistics_path (str | None): If set, load/save statistics only at this path.
+                If None, uses ``<data_dir>/dataset_statistics_<hash>.json``; when that path is missing
+                and ``data_dir`` is not writable, falls back to ``/tmp/robomimic_dataset_cache/``
+                with a :class:`UserWarning`.
         """
         super().__init__()
 
@@ -431,20 +436,30 @@ class RoboCasaDataset(torch.utils.data.Dataset):
                     return np.concatenate(parts, axis=-1).astype(np.float32)
                 return np.zeros((length, self.PROPRIO_DIM), dtype=np.float32)
 
-            # Cache key from loaded demos: same demo set -> same stats file
+            # Effective data_dir for stats: parent dir when data_dir is a single file
+            stats_data_dir = os.path.dirname(os.path.abspath(self.data_dir)) if os.path.isfile(self.data_dir) else self.data_dir
             demo_sig = ",".join(sorted("{}::{}".format(fp, dk) for fp, dk in self.demos))
             cache_key = hashlib.md5(demo_sig.encode()).hexdigest()[:16]
-            stats_path = os.path.join(_ROBOCASA_STATS_CACHE_DIR, "dataset_statistics_{}.json".format(cache_key))
+            stats_filename = "dataset_statistics_{}.json".format(cache_key)
 
-            self._dataset_stats = load_or_compute_dataset_statistics(
-                data_dir=_ROBOCASA_STATS_CACHE_DIR,
-                data={i: {
-                    "actions": self._action_data[i],
-                    "proprio": _get_proprio(self._obs_data[i], self.demo_lengths[i]),
-                }
-                       for i in range(len(self.demos))},
-                stats_path=stats_path,
-            )
+            if dataset_statistics_path is not None:
+                self._dataset_stats = load_or_compute_dataset_statistics(
+                    data_dir=stats_data_dir,
+                    data={i: {
+                        "actions": self._action_data[i],
+                        "proprio": _get_proprio(self._obs_data[i], self.demo_lengths[i]),
+                    } for i in range(len(self.demos))},
+                    stats_path=dataset_statistics_path,
+                )
+            else:
+                self._dataset_stats = load_or_compute_dataset_statistics(
+                    data_dir=stats_data_dir,
+                    data={i: {
+                        "actions": self._action_data[i],
+                        "proprio": _get_proprio(self._obs_data[i], self.demo_lengths[i]),
+                    } for i in range(len(self.demos))},
+                    stats_filename=stats_filename,
+                )
             # Normalise actions in-place
             a_min = self._dataset_stats["actions_min"]
             a_max = self._dataset_stats["actions_max"]

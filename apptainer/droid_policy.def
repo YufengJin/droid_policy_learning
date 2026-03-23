@@ -1,105 +1,116 @@
 Bootstrap: docker
 From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
 
+# 与 docker/Dockerfile 对齐：INCLUDE_ROBOCASA=1 时安装 RoboCasa 系统库、robosuite、uv sync --extra robocasa
+# 构建：apptainer build droid_policy.sif apptainer/droid_policy.def
+# RoboCasa：apptainer build --build-arg INCLUDE_ROBOCASA=1 droid_policy_robocasa.sif apptainer/droid_policy.def
+%arguments
+    INCLUDE_ROBOCASA "0"
+
 %labels
     Author Droid_Dev
-    Version 1.8
-    Description Droid Policy Learning (def template style)
+    Version 2.0
+    Description Droid Policy Learning (uv + pyproject, aligned with docker/Dockerfile)
 
+# 在仓库根目录执行 apptainer build（路径相对于当前工作目录）
 %files
-    apptainer/requirements-apptainer.txt /requirements.txt
+    pyproject.toml /build/pyproject.toml
+    uv.lock /build/uv.lock
+    docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 %environment
     export DEBIAN_FRONTEND=noninteractive
-    export MAMBA_ROOT_PREFIX=/opt/conda
-    export PATH=/opt/conda/envs/droid_env/bin:/opt/conda/bin:$PATH
     export LC_ALL=C.UTF-8
     export LANG=C.UTF-8
-    export CONDA_DEFAULT_ENV=droid_env
+    export PATH="/opt/venv/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    export VIRTUAL_ENV="/opt/venv"
     export HOME=/root
     export HF_HOME=/root/.cache/huggingface
 
 %post
     export DEBIAN_FRONTEND=noninteractive
-    export MAMBA_ROOT_PREFIX=/opt/conda
-    export ENV_NAME=droid_env
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
 
-    # 1. System dependencies
+    INCLUDE_ROBOCASA="{{ INCLUDE_ROBOCASA }}"
+
+    # 1. System dependencies（与 docker/Dockerfile 一致）
     apt-get update -y
     apt-get install -y \
-        curl wget tar procps bzip2 ca-certificates git build-essential cmake unzip ffmpeg \
-        libgl1-mesa-glx libglib2.0-0 vim tzdata
+        curl wget tar procps bzip2 ca-certificates git build-essential cmake unzip \
+        ffmpeg libgl1-mesa-glx libglib2.0-0
     apt-get clean
     rm -rf /var/lib/apt/lists/*
 
-    # 2. Install Micromamba (same as docker/Dockerfile)
-    mkdir -p /usr/local/bin
-    curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | \
-        tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
-    chmod +x /usr/local/bin/micromamba
-    export PATH=/usr/local/bin:$PATH
+    if [ "${INCLUDE_ROBOCASA}" = "1" ]; then
+        apt-get update -y
+        apt-get install -y --no-install-recommends \
+            libx11-6 libxext6 libxrender1 libsm6 libegl1 libosmesa6 libhidapi-libusb0 \
+            lsof psmisc
+        apt-get clean
+        rm -rf /var/lib/apt/lists/*
+    fi
 
-    # 3. Create conda environment
-    micromamba create -y -n $ENV_NAME python=3.10.* -c conda-forge
-    micromamba clean -a -y
+    # 2. uv（与 docker/Dockerfile 一致）
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="/root/.local/bin:${PATH}"
 
-    # 4. Install pip dependencies (use env's pip via PATH)
-    export PATH=/opt/conda/envs/$ENV_NAME/bin:$PATH
+    # 3. Python venv
+    uv venv --python 3.10 /opt/venv
+    export PATH="/opt/venv/bin:${PATH}"
+    export VIRTUAL_ENV="/opt/venv"
 
-    pip install --upgrade pip
-
-    # PyTorch & JAX (CUDA) - must install before requirements.txt
-    pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 \
-        --extra-index-url https://download.pytorch.org/whl/cu118
-    pip install --upgrade "jax[cuda11_pip]==0.4.20" \
-        -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-
-    # Install from requirements.txt
-    pip install -r /requirements.txt
-
-    # dlimp (git)
-    pip install "dlimp @ git+https://github.com/kvablack/dlimp@5edaa4691567873d495633f2708982b42edf1972"
-
-    # egl_probe (needs --no-build-isolation)
-    export CMAKE_POLICY_VERSION_MINIMUM=3.5
-    pip install --no-build-isolation 'egl_probe>=1.0.1'
-
-    # 5. Octo
-    mkdir -p /opt/third_party && cd /opt/third_party
+    # 4. Octo（与 docker/Dockerfile 一致）
+    mkdir -p /opt/third_party
+    cd /opt/third_party
     git clone https://github.com/octo-models/octo.git
     cd octo && git checkout 85b83fc19657ab407a7f56558a5384ae56fe453b
-    pip install -e /opt/third_party/octo
 
-    # 6. Robomimic
-    cd /opt/third_party
-    git clone https://github.com/ARISE-Initiative/robomimic.git
-    cd robomimic
-    pip install --no-build-isolation -e .
+    # 5. Robosuite（仅 INCLUDE_ROBOCASA=1）
+    if [ "${INCLUDE_ROBOCASA}" = "1" ]; then
+        cd /opt/third_party
+        git clone https://github.com/ARISE-Initiative/robosuite.git robosuite
+        cd robosuite && git checkout v1.5.2
+        uv pip install -e .
+    fi
 
-    # Optional: clean up
-    micromamba clean -a -y
+    # 6. 锁定依赖栈（uv sync，与 docker/Dockerfile 一致）
+    cd /build
+    if [ "${INCLUDE_ROBOCASA}" = "1" ]; then
+        CMAKE_POLICY_VERSION_MINIMUM=3.5 uv sync --frozen --no-install-project --active --extra robocasa
+    else
+        CMAKE_POLICY_VERSION_MINIMUM=3.5 uv sync --frozen --no-install-project --active
+    fi
 
-    # 7. Mount points
+    # 7. Octo editable
+    uv pip install -e /opt/third_party/octo
+
+    # 8. 运行时与 Docker 一致：entrypoint 负责 uv pip install -e 项目（及 RoboCasa 资产）
+    chmod +x /usr/local/bin/entrypoint.sh
+
+    # 9. 挂载占位目录
     mkdir -p /workspace/droid_policy_learning
     mkdir -p /workspace/datasets/droid
     mkdir -p /workspace/datasets/robocasa
+    mkdir -p /workspace/datasets/libero
     mkdir -p /root/.cache/huggingface
 
-    # bash.bashrc for apptainer shell
-    cat >> /etc/bash.bashrc << 'EOF'
-export MAMBA_ROOT_PREFIX=/opt/conda
-if [ -x "/usr/local/bin/micromamba" ]; then
-    eval "$(/usr/local/bin/micromamba shell hook --shell bash)"
-    micromamba activate droid_env
-fi
-EOF
+    # 与 docker/entrypoint.sh 中 INCLUDE_ROBOCASA 判断一致
+    echo "${INCLUDE_ROBOCASA}" > /etc/droid_policy_include_robocasa
+    printf 'export INCLUDE_ROBOCASA="%s"\n' "${INCLUDE_ROBOCASA}" > /etc/profile.d/99-droid-policy-robocasa-flag.sh
 
 %runscript
-    if [ -f "/workspace/droid_policy_learning/apptainer/entrypoint.sh" ]; then
-        exec /workspace/droid_policy_learning/apptainer/entrypoint.sh "$@"
-    else
-        export MAMBA_ROOT_PREFIX=/opt/conda
-        eval "$(/usr/local/bin/micromamba shell hook --shell bash)"
-        micromamba activate droid_env
-        exec "$@"
+    export PATH="/opt/venv/bin:/root/.local/bin:${PATH:-/usr/bin:/bin}"
+    export VIRTUAL_ENV="/opt/venv"
+    if [ -f /etc/droid_policy_include_robocasa ]; then
+        export INCLUDE_ROBOCASA="$(tr -d '\n' < /etc/droid_policy_include_robocasa)"
     fi
+    if [ "$#" -eq 0 ]; then
+        set -- /bin/bash
+    fi
+    exec /usr/local/bin/entrypoint.sh "$@"
+
+%help
+    与 docker/Dockerfile 对齐：uv + pyproject.toml + uv.lock；入口为 docker/entrypoint.sh。
+    在仓库根目录构建：apptainer build droid_policy.sif apptainer/droid_policy.def
+    RoboCasa 变体：apptainer build --build-arg INCLUDE_ROBOCASA=1 out.sif apptainer/droid_policy.def

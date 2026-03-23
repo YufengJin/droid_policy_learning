@@ -20,8 +20,12 @@ Config 通过 Hydra 从 robomimic/scripts/train_configs/train_libero.yaml 读取
 Debug（debug=true）时为避免整库载入导致 OOM（进程被 Killed）：
   - 默认在配置路径下存在子目录 ``libero_10`` 时只使用该子目录；
   - 或通过环境变量 ``LIBERO_DEBUG_DATA_DIR`` 指定小数据目录；
-  - ``dataset_statistics.json`` 写到 ``/tmp/libero_dataset_cache/``（只读数据盘也可跑）；
+  - ``dataset_statistics.json`` 写到 ``/tmp/robomimic_dataset_cache/``（只读数据盘也可跑）；
   - 默认最多载入 ``LIBERO_DEBUG_MAX_DEMOS``（默认 16）个 demo，可加大或设为更大整数。
+
+非 debug、数据目录只读：统计会自动写入 ``/tmp/robomimic_dataset_cache/`` 并发出 ``UserWarning``（无需设置环境变量）。可选 ``LIBERO_DATASET_STATISTICS_PATH`` 强制指定统计文件路径。
+
+减少终端噪音：默认不再打印完整 config / 整网结构；需要时设 ``LIBERO_VERBOSE_CONFIG=1``、``LIBERO_VERBOSE_MODEL=1``。
 """
 
 import hashlib
@@ -182,7 +186,7 @@ def _libero_debug_dataset_kwargs(debug, config_data_path):
             sub = os.path.join(data_dir, "libero_10")
             if os.path.isdir(sub):
                 data_dir = sub
-    cache_root = os.path.join(tempfile.gettempdir(), "libero_dataset_cache")
+    cache_root = os.path.join(tempfile.gettempdir(), "robomimic_dataset_cache")
     os.makedirs(cache_root, exist_ok=True)
     sig = hashlib.md5(os.path.abspath(data_dir).encode("utf-8")).hexdigest()[:16]
     stats_path = os.path.join(cache_root, "dataset_statistics_{}.json".format(sig))
@@ -207,7 +211,7 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
     torch.set_num_threads(1)
 
     is_main = rank == 0
-    log_dir, ckpt_dir, video_dir, vis_dir = TrainUtils.get_exp_dir(config)
+    log_dir, ckpt_dir, video_dir, vis_dir = TrainUtils.get_exp_dir(config, prompt_on_exists=False)
 
     if is_main and config.experiment.logging.terminal_output_to_txt:
         logger = PrintLogger(os.path.join(log_dir, "log.txt"))
@@ -219,8 +223,13 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
         print("world_size={} rank={} local_rank={}".format(world_size, rank, local_rank))
         print("effective batch_size = {} * {} = {}".format(
             config.train.batch_size, world_size, config.train.batch_size * world_size))
-        print(config)
-        print("")
+        if os.environ.get("LIBERO_VERBOSE_CONFIG", "").strip() in ("1", "true", "yes"):
+            print(config)
+            print("")
+        else:
+            print("algo_name={}  train.batch_size={}  train.num_epochs={}  experiment.validate={}".format(
+                config.algo_name, config.train.batch_size, config.train.num_epochs, config.experiment.validate))
+            print("")
 
     ObsUtils.initialize_obs_utils_with_config(config)
     ds_format = config.train.data_format
@@ -233,17 +242,15 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
     if debug:
         dbg_ds_kw = _libero_debug_dataset_kwargs(True, config_data_path)
         data_dir = dbg_ds_kw.pop("_resolved_data_dir")
-        if is_main:
-            print(
-                "[debug] LIBERO data_dir={} max_demos={} dataset_statistics_path={}".format(
-                    data_dir,
-                    dbg_ds_kw.get("max_demos"),
-                    dbg_ds_kw.get("dataset_statistics_path"),
-                )
-            )
     else:
         data_dir = os.path.expanduser(config_data_path)
         dbg_ds_kw = {}
+
+    _stats_env = os.environ.get("LIBERO_DATASET_STATISTICS_PATH", "").strip()
+    if _stats_env:
+        dbg_ds_kw = dict(dbg_ds_kw)
+        dbg_ds_kw["dataset_statistics_path"] = os.path.expanduser(_stats_env)
+
     if not os.path.exists(data_dir):
         raise FileNotFoundError("Dataset at provided path {} not found!".format(data_dir))
 
@@ -383,17 +390,11 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     if is_main:
-        print("\n============= Model Summary =============")
-        print(model.module if use_ddp else model)
-        print("")
+        if os.environ.get("LIBERO_VERBOSE_MODEL", "").strip() in ("1", "true", "yes"):
+            print("\n============= Model Summary =============")
+            print(model.module if use_ddp else model)
+            print("")
         flush_warnings()
-
-    if is_main and debug:
-        from robomimic.utils.debug_training_sample import dump_training_batch_debug
-        _dbg_batch = next(iter(train_loader))
-        _dbg_path = dump_training_batch_debug(_dbg_batch, log_dir, "train_libero")
-        if _dbg_path:
-            print("\n============= [DEBUG] Saved sample dump: {} =============\n".format(_dbg_path))
 
     # -----------------------------------------------------------------------
     # Training loop

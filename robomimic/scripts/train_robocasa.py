@@ -26,6 +26,8 @@ Usage:
   docker exec -it -w /workspace/droid_policy_learning droid-dev-headless python -m robomimic.scripts.train_robocasa
 
 Config 通过 Hydra 从 robomimic/scripts/train_configs/train_robocasa.yaml 读取。
+
+减少终端噪音：默认不打印完整 config / 整网结构；需要时设 ``ROBOCASA_VERBOSE_CONFIG=1``、``ROBOCASA_VERBOSE_MODEL=1``。
 """
 
 import json
@@ -289,8 +291,19 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         print("effective batch_size = {} * {} = {}".format(
             config.train.batch_size, world_size, config.train.batch_size * world_size
         ))
-        print(config)
-        print("")
+        if os.environ.get("ROBOCASA_VERBOSE_CONFIG", "").strip().lower() in ("1", "true", "yes"):
+            print(config)
+            print("")
+        else:
+            print(
+                "algo_name={}  train.batch_size={}  train.num_epochs={}  experiment.validate={}".format(
+                    config.algo_name,
+                    config.train.batch_size,
+                    config.train.num_epochs,
+                    config.experiment.validate,
+                )
+            )
+            print("")
 
     # -----------------------------------------------------------------------
     # 观测与数据格式
@@ -321,6 +334,10 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         if isinstance(img_dim, (list, tuple)) and len(img_dim) >= 1:
             image_size = (img_dim[0], img_dim[1] if len(img_dim) > 1 else img_dim[0])
 
+    # dataset_statistics_path: optional override (e.g. ROBOCASA_DATASET_STATISTICS_PATH)
+    _stats_env = os.environ.get("ROBOCASA_DATASET_STATISTICS_PATH", "").strip()
+    ds_stats_kw = {"dataset_statistics_path": os.path.expanduser(_stats_env)} if _stats_env else {}
+
     # 训练集
     trainset = RoboCasaDataset(
         data_dir=data_dir,
@@ -335,6 +352,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         image_size=image_size,
         normalize_actions=True,
         verbose=debug,
+        **ds_stats_kw,
     )
 
     # 验证集：同一 data_dir，用 mask/valid 的 demo（需 HDF5 内有 valid mask）
@@ -355,6 +373,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                 image_size=image_size,
                 normalize_actions=True,
                 verbose=debug,
+                **ds_stats_kw,
             )
         except Exception as e:
             if is_main:
@@ -404,9 +423,6 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         "ac_dim": ac_dim,
         "use_images": any(k in str(all_obs_keys) for k in ["image", "rgb"]),
     }
-    if is_main:
-        print("all_obs_keys = {}".format(all_obs_keys))
-        print("shape_meta['all_shapes'] = {}".format(dict(all_shapes)))
 
     # -----------------------------------------------------------------------
     # DataLoader：DDP 时用 DistributedSampler 保证各 rank 数据不重叠
@@ -626,9 +642,10 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     if is_main:
-        print("\n============= Model Summary =============")
-        print(model.module if use_ddp else model)
-        print("")
+        if os.environ.get("ROBOCASA_VERBOSE_MODEL", "").strip().lower() in ("1", "true", "yes"):
+            print("\n============= Model Summary =============")
+            print(model.module if use_ddp else model)
+            print("")
         flush_warnings()
 
     if is_main and debug:

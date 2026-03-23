@@ -30,5 +30,16 @@ if [ "${INCLUDE_ROBOCASA}" = "1" ] && [ -f "/workspace/droid_policy_learning/ben
     fi
 fi
 
+# Claude Code CLI (optional: set INSTALL_CLAUDE_CODE=1 to install)
+if [ "${INSTALL_CLAUDE_CODE}" = "1" ]; then
+    echo ">> Installing Claude Code CLI..."
+    if curl -fsSL https://claude.ai/install.sh | bash 2>/dev/null; then
+        export PATH="${HOME}/.local/bin:${PATH}"
+        echo ">> Claude Code CLI installed. Run 'claude' to start."
+    else
+        echo ">> Claude Code CLI install skipped (network or install script unavailable)."
+    fi
+fi
+
 echo ">> Ready."
 exec "$@"

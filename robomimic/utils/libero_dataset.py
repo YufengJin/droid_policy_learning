@@ -88,8 +88,10 @@ class LIBERODataset(torch.utils.data.Dataset):
             filter_key (str | None): "train" or "valid" to select demos.
             image_size (tuple | None): (H, W) target for image resizing.
             normalize_actions (bool): Whether to normalise actions to [-1, 1].
-            dataset_statistics_path (str | None): If set, load/save ``dataset_statistics.json``
-                at this path instead of under ``data_dir`` (for read-only dataset roots).
+            dataset_statistics_path (str | None): If set, load/save statistics only at this path.
+                If None, uses ``<data_dir>/dataset_statistics.json``; when that path is missing and
+                ``data_dir`` is not writable, :func:`load_or_compute_dataset_statistics` falls back to
+                ``/tmp/robomimic_dataset_cache/`` with a warning.
             max_demos (int | None): If set, load at most this many demos (debug / smoke tests).
         """
         super().__init__()

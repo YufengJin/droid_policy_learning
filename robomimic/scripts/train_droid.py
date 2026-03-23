@@ -19,6 +19,8 @@ Usage:
 
 Config 通过 Hydra 从 robomimic/scripts/train_configs/train_rlds.yaml 读取。
 Ctrl+C 会 cleanup DDP 并释放 MASTER_PORT（默认 29500）；端口占用时可改用 MASTER_PORT=29501。
+
+减少终端噪音：默认不打印完整 config / 整网结构；需要时设 ``DROID_VERBOSE_CONFIG=1``、``DROID_VERBOSE_MODEL=1``。
 """
 
 import json
@@ -179,8 +181,20 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
     if is_main:
         print("\n============= DDP Training Run =============")
         print("world_size={} rank={} local_rank={}".format(world_size, rank, local_rank))
-        print(config)
-        print("")
+        if os.environ.get("DROID_VERBOSE_CONFIG", "").strip().lower() in ("1", "true", "yes"):
+            print(config)
+            print("")
+        else:
+            print(
+                "algo_name={}  train.batch_size={}  train.num_epochs={}  data_format={}  experiment.validate={}".format(
+                    config.algo_name,
+                    config.train.batch_size,
+                    config.train.num_epochs,
+                    getattr(config.train, "data_format", "?"),
+                    config.experiment.validate,
+                )
+            )
+            print("")
 
     ObsUtils.initialize_obs_utils_with_config(config)
     ds_format = config.train.data_format
@@ -405,9 +419,10 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     if is_main:
-        print("\n============= Model Summary =============")
-        print(model.module if use_ddp else model)
-        print("")
+        if os.environ.get("DROID_VERBOSE_MODEL", "").strip().lower() in ("1", "true", "yes"):
+            print("\n============= Model Summary =============")
+            print(model.module if use_ddp else model)
+            print("")
         flush_warnings()
 
     if is_main and debug:

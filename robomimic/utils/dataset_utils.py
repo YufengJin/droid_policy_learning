@@ -5,9 +5,12 @@ Ported and adapted from cosmos-policy's dataset_utils.py and dataset_common.py
 for use with the robomimic training pipeline.
 """
 
+import hashlib
 import io
 import json
 import os
+import tempfile
+import warnings
 
 import h5py
 import numpy as np
@@ -99,36 +102,103 @@ def calculate_dataset_statistics(data):
     return stats
 
 
-def load_or_compute_dataset_statistics(data_dir, data, calc_fn=None, stats_path=None):
+def _dir_is_writable(dir_path):
+    """Best-effort: True if *dir_path* exists and is writable (e.g. not a read-only bind mount)."""
+    try:
+        return os.path.isdir(dir_path) and os.access(dir_path, os.W_OK)
+    except OSError:
+        return False
+
+
+def _dataset_statistics_tmp_cache_path(data_dir, cache_suffix=None):
+    """Stable path under /tmp for stats when *data_dir* is read-only.
+
+    Args:
+        data_dir: Dataset root; used for hash when cache_suffix is None.
+        cache_suffix: Optional suffix (e.g. demo-set hash) for unique filenames.
+    """
+    cache_root = os.path.join(tempfile.gettempdir(), "robomimic_dataset_cache")
+    if cache_suffix is not None:
+        sig = cache_suffix
+    else:
+        sig = hashlib.md5(os.path.abspath(data_dir).encode("utf-8")).hexdigest()[:16]
+    return os.path.join(cache_root, "dataset_statistics_{}.json".format(sig))
+
+
+def load_or_compute_dataset_statistics(data_dir, data, calc_fn=None, stats_path=None, stats_filename=None):
     """
     Load statistics from ``dataset_statistics.json``, or compute and save if missing.
 
+    If *stats_path* is None, the default file is ``<data_dir>/<stats_filename>`` where
+    *stats_filename* defaults to ``dataset_statistics.json``. When that file is missing and
+    ``data_dir`` is not writable, statistics are computed and written under
+    ``/tmp/robomimic_dataset_cache/dataset_statistics_<hash>.json`` instead, and a
+    :class:`UserWarning` is issued (stats are not persisted next to the dataset). Later runs
+    load from that cache if the dataset path still has no JSON.
+
     Args:
-        data_dir: Used when stats_path is None: stats_path = data_dir/dataset_statistics.json
+        data_dir: Used when stats_path is None: default stats next to dataset.
         data: Episode data dict for computing statistics.
         calc_fn: Function to compute raw stats; default: calculate_dataset_statistics.
-        stats_path: Optional override. If provided, load/save from this exact path.
+        stats_path: Optional override. If provided, always load/save this path (no read-only
+            fallback to /tmp).
+        stats_filename: Optional basename when stats_path is None; default ``dataset_statistics.json``.
+            Use e.g. ``dataset_statistics_<hash>.json`` when multiple stats files per data_dir exist.
 
     Returns:
         dict: Statistics with numpy-array values.
     """
     if calc_fn is None:
         calc_fn = calculate_dataset_statistics
+    explicit_path = stats_path is not None
     if stats_path is None:
-        stats_path = os.path.join(data_dir, "dataset_statistics.json")
-    if os.path.exists(stats_path):
-        with open(stats_path, "r") as f:
+        fn = stats_filename if stats_filename is not None else "dataset_statistics.json"
+        primary_path = os.path.join(data_dir, fn)
+    else:
+        primary_path = stats_path
+
+    if explicit_path:
+        tmp_fallback_path = None
+    elif stats_filename is not None:
+        sig = hashlib.md5((os.path.abspath(data_dir) + stats_filename).encode()).hexdigest()[:16]
+        tmp_fallback_path = _dataset_statistics_tmp_cache_path(data_dir, cache_suffix=sig)
+    else:
+        tmp_fallback_path = _dataset_statistics_tmp_cache_path(data_dir)
+
+    json_stats = None
+    load_path = None
+    if os.path.exists(primary_path):
+        load_path = primary_path
+    elif tmp_fallback_path is not None and os.path.exists(tmp_fallback_path):
+        load_path = tmp_fallback_path
+
+    if load_path is not None:
+        with open(load_path, "r") as f:
             json_stats = json.load(f)
-        print("Loaded dataset statistics from: {}".format(stats_path))
+        print("Loaded dataset statistics from: {}".format(load_path))
     else:
         raw = calc_fn(data)
         json_stats = {k: v.tolist() for k, v in raw.items()}
-        stats_parent = os.path.dirname(stats_path)
-        if stats_parent:
-            os.makedirs(stats_parent, exist_ok=True)
-        with open(stats_path, "w") as f:
+        save_path = primary_path
+        save_parent = os.path.dirname(os.path.abspath(save_path)) or os.path.abspath(".")
+        if not explicit_path and not _dir_is_writable(save_parent):
+            save_path = tmp_fallback_path
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            warnings.warn(
+                "Cannot write dataset_statistics.json under dataset directory {!r} (read-only or not "
+                "writable). Statistics were computed and saved to {!r} only; they are not persisted next "
+                "to the dataset (subsequent runs will reuse this cache file if it exists).".format(
+                    data_dir, save_path
+                ),
+                UserWarning,
+                stacklevel=2,
+            )
+        parent = os.path.dirname(save_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(save_path, "w") as f:
             json.dump(json_stats, f, indent=4)
-        print("Dataset statistics saved to: {}".format(stats_path))
+        print("Dataset statistics saved to: {}".format(save_path))
     return {k: np.array(v) for k, v in json_stats.items()}
 
 
