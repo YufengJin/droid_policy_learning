@@ -4,6 +4,7 @@ mean-shift drift loss (from drift_model/run_experiment.py) instead of noise pred
 Inference: 1 NFE via single DDIM step from pure noise.
 """
 
+import warnings
 from collections import OrderedDict
 
 import torch
@@ -34,6 +35,10 @@ class DriftPolicyUNet(DiffusionPolicyUNet):
     Inference: 1 NFE (config sets ddim.num_inference_timesteps=1).
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._train_step_counter = 0
+
     def _pred_x0_from_noise(self, sample, timesteps, noise_pred):
         """
         Convert epsilon prediction to pred_original_sample (x0) using scheduler alphas.
@@ -58,6 +63,15 @@ class DriftPolicyUNet(DiffusionPolicyUNet):
         temp = getattr(drift_cfg, "temp", 0.05) if drift_cfg else 0.05
         max_drift = getattr(drift_cfg, "max_drift", 0.1) if drift_cfg else 0.1
         use_adaptive_temp = getattr(drift_cfg, "use_adaptive_temp", True) if drift_cfg else True
+        kernel_type = getattr(drift_cfg, "kernel_type", "laplace") if drift_cfg else "laplace"
+        dist_scale_mode = getattr(drift_cfg, "dist_scale_mode", "none") if drift_cfg else "none"
+        rbf_sigma = getattr(drift_cfg, "rbf_sigma", 1.0) if drift_cfg else 1.0
+        adaptive_median_scale = getattr(drift_cfg, "adaptive_median_scale", 0.3) if drift_cfg else 0.3
+        adaptive_min_temp = getattr(drift_cfg, "adaptive_min_temp", 0.01) if drift_cfg else 0.01
+        log_kernel_stats = getattr(drift_cfg, "log_kernel_stats", True) if drift_cfg else True
+        log_every_n = getattr(drift_cfg, "log_kernel_every_n_steps", 100) if drift_cfg else 100
+        assert_alive = getattr(drift_cfg, "assert_alive_kernel", False) if drift_cfg else False
+        alive_threshold = getattr(drift_cfg, "alive_kernel_threshold", 1e-6) if drift_cfg else 1e-6
 
         with TorchUtils.maybe_no_grad(no_grad=validate):
             info = super(DiffusionPolicyUNet, self).train_on_batch(batch, epoch, validate=validate)
@@ -91,8 +105,25 @@ class DriftPolicyUNet(DiffusionPolicyUNet):
             gen_flat = pred_x0_ema.reshape(B, -1)
             pos_flat = actions.reshape(B, -1)
 
-            adaptive_temp = compute_adaptive_temp(gen_flat, pos_flat, base_temp=temp) if use_adaptive_temp else temp
-            V = compute_drift(gen_flat, pos_flat, temp=adaptive_temp)
+            adaptive_temp = (
+                compute_adaptive_temp(
+                    gen_flat, pos_flat,
+                    base_temp=temp,
+                    median_scale=adaptive_median_scale,
+                    min_temp=adaptive_min_temp,
+                    dist_scale_mode=dist_scale_mode,
+                )
+                if use_adaptive_temp
+                else temp
+            )
+
+            V, kernel_stats = compute_drift(
+                gen_flat, pos_flat,
+                temp=adaptive_temp,
+                kernel_type=kernel_type,
+                dist_scale_mode=dist_scale_mode,
+                rbf_sigma=rbf_sigma,
+            )
             V = clip_drift(V, max_drift)
             target = (gen_flat + V).detach()
 
@@ -107,6 +138,20 @@ class DriftPolicyUNet(DiffusionPolicyUNet):
             info["losses"] = TensorUtils.detach({"l2_loss": loss, "drift_loss": loss})
             info["_drift_norm"] = V.norm(dim=-1).mean().item()
             info["_adaptive_temp"] = adaptive_temp
+
+            # Kernel observability
+            self._train_step_counter += 1
+            should_log_kernel = log_kernel_stats and (self._train_step_counter % log_every_n == 0)
+            if should_log_kernel:
+                info["_kernel_stats"] = kernel_stats
+
+            # Kernel alive check
+            if assert_alive and kernel_stats["kernel_max"] < alive_threshold:
+                warnings.warn(
+                    f"Drift kernel appears dead: kernel_max={kernel_stats['kernel_max']:.2e} "
+                    f"< threshold={alive_threshold:.2e}. Consider enabling dist_scale_mode=sqrt_dim "
+                    f"or switching to kernel_type=rbf."
+                )
 
             if not validate:
                 policy_grad_norms = TorchUtils.backprop_for_loss(
@@ -128,6 +173,11 @@ class DriftPolicyUNet(DiffusionPolicyUNet):
             log["Drift_Norm"] = info["_drift_norm"]
         if "_adaptive_temp" in info:
             log["Drift_Temp"] = info["_adaptive_temp"]
+        if "_kernel_stats" in info:
+            stats = info["_kernel_stats"]
+            log["Drift_Kernel_Max"] = stats["kernel_max"]
+            log["Drift_Kernel_Mean"] = stats["kernel_mean"]
+            log["Drift_Dist_Median"] = stats["dist_median"]
         if "policy_grad_norms" in info:
             log["Policy_Grad_Norms"] = info["policy_grad_norms"]
         return log

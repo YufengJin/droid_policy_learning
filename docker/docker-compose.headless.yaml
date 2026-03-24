@@ -10,6 +10,8 @@ services:
     stdin_open: true
 
     environment:
+      # 传入宿主机变量，与 entrypoint 中 INSTALL_CLAUDE_CODE=1 安装 Claude Code CLI 一致
+      - INSTALL_CLAUDE_CODE=${INSTALL_CLAUDE_CODE:-0}
       - PYTHONUNBUFFERED=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all

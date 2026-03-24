@@ -15,7 +15,10 @@ Usage:
   # 单卡:
   python -m robomimic.scripts.train_libero
 
-Config 通过 Hydra 从 robomimic/scripts/train_configs/train_libero.yaml 读取。
+Config 通过 Hydra 从 robomimic/scripts/train_configs/ 读取；默认 train_libero.yaml。
+Drift Policy：使用 train_libero_drift.yaml 时设置环境变量
+LIBERO_TRAIN_HYDRA_CONFIG=train_libero_drift，或保留默认配置并传 algo_name=drift_policy。
+详见 docs/drift_libero_training_report.md。
 
 Debug（debug=true）时为避免整库载入导致 OOM（进程被 Killed）：
   - 默认在配置路径下存在子目录 ``libero_10`` 时只使用该子目录；
@@ -106,9 +109,11 @@ def get_config_from_args():
     if not os.path.isdir(config_dir):
         raise FileNotFoundError("Config directory not found: {}".format(config_dir))
     overrides = list(sys.argv[1:])
+    # e.g. LIBERO_TRAIN_HYDRA_CONFIG=train_libero_drift for Drift Policy (see docs/drift_libero_training_report.md)
+    hydra_config_name = os.environ.get("LIBERO_TRAIN_HYDRA_CONFIG", "train_libero").strip() or "train_libero"
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=os.path.abspath(config_dir), version_base="1.1"):
-        cfg = compose(config_name="train_libero", overrides=overrides)
+        cfg = compose(config_name=hydra_config_name, overrides=overrides)
 
     load_from = OmegaConf.select(cfg, "load_from")
     if load_from is not None and str(load_from).strip() != "":

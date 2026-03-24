@@ -1,20 +1,14 @@
 # ============================================================================
-# Hydra 配置文件：LIBERO HDF5 数据格式训练配置
+# Hydra：LIBERO + Drift Policy（mean-shift drift loss，1-NFE 推理）
 # ============================================================================
-# 使用方法：
-#   1. 多卡 DDP 训练:
-#      torchrun --nproc_per_node=4 -m robomimic.scripts.train_libero
-#   2. 带覆盖:
-#      torchrun --nproc_per_node=8 -m robomimic.scripts.train_libero \
-#          'train.data=[{path: /workspace/datasets/libero/}]' \
-#          train.batch_size=32
-#   3. 单卡训练:
-#      python -m robomimic.scripts.train_libero
-#   4. Debug 模式:
-#      python -m robomimic.scripts.train_libero debug=true
-#   5. Drift Policy（专用 yaml）:
-#      LIBERO_TRAIN_HYDRA_CONFIG=train_libero_drift python -m robomimic.scripts.train_libero
-#      说明见 docs/drift_libero_training_report.md
+# 用法：
+#   推荐：指定 Hydra 配置名（需设置环境变量，见 train_libero.py）
+#     LIBERO_TRAIN_HYDRA_CONFIG=train_libero_drift torchrun --nproc_per_node=4 \
+#       -m robomimic.scripts.train_libero
+#   或仍用默认 train_libero.yaml，仅覆盖算法：
+#     python -m robomimic.scripts.train_libero algo_name=drift_policy
+#
+# 架构与超参说明见：docs/drift_libero_training_report.md
 # ============================================================================
 
 load_from: null
@@ -23,13 +17,13 @@ debug: false
 # ----------------------------------------------------------------------------
 # 算法配置
 # ----------------------------------------------------------------------------
-algo_name: diffusion_policy
+algo_name: drift_policy
 
 # ----------------------------------------------------------------------------
 # 实验配置 (experiment)
 # ----------------------------------------------------------------------------
 experiment:
-  name: null  # 自动生成
+  name: null
 
   validate: true
 
@@ -37,7 +31,7 @@ experiment:
     terminal_output_to_txt: true
     log_tb: true
     log_wandb: true
-    wandb_proj_name: diffusion_policy_libero
+    wandb_proj_name: drift_policy_libero
 
   mse:
     enabled: true
@@ -60,8 +54,8 @@ experiment:
 
   env: null
   additional_envs: null
-  ckpt_path: null   # 设为已有 .pth 可加载权重
-  resume: false     # true=完整恢复(optimizer+scheduler+epoch)；false=仅加载权重(微调)
+  ckpt_path: null
+  resume: false
   env_meta_update_dict: {}
 
   render: false
@@ -81,7 +75,6 @@ experiment:
 # 训练配置 (train)
 # ----------------------------------------------------------------------------
 train:
-  # LIBERO 数据集路径（目录，内含多个 HDF5 文件，每个文件对应一个 task suite）
   data:
     - path: /workspace/datasets/libero/
       weight: 1.0
@@ -90,7 +83,6 @@ train:
 
   output_dir: /workspace/droid_policy_learning/outputs
 
-  # HDF5 数据集参数
   hdf5_filter_key: train
   hdf5_validation_filter_key: valid
   hdf5_cache_mode: low_dim
@@ -99,7 +91,6 @@ train:
   hdf5_load_next_obs: true
   num_data_workers: 4
 
-  # 序列配置
   seq_length: 15
   pad_seq_length: true
   frame_stack: 2
@@ -110,13 +101,11 @@ train:
   goal_mode: null
   truncated_geom_factor: 0.3
 
-  # 训练超参数
   cuda: true
   batch_size: 64
   num_epochs: 100000
   seed: 1
 
-  # LIBERO 动作配置: 7D (3D pos + 3D rot + 1D gripper)
   action_keys:
     - actions
 
@@ -129,7 +118,8 @@ train:
   shuffled_obs_key_groups: []
 
 # ----------------------------------------------------------------------------
-# 算法特定配置 (algo) — Diffusion Policy
+# 算法特定配置 — 与 Diffusion 共用 UNet/调度器；DriftPolicyConfig 会强制
+# noise_samples=1、ddim/ddpm num_inference_timesteps=1
 # ----------------------------------------------------------------------------
 algo:
   optim_params:
@@ -174,7 +164,25 @@ algo:
     steps_offset: 0
     prediction_type: epsilon
 
-  noise_samples: 8
+  # DriftPolicyConfig 会覆盖为 1；此处写明便于阅读
+  noise_samples: 1
+
+  drift:
+    temp: 0.05
+    max_drift: 0.1
+    use_adaptive_temp: true
+    # P0: kernel type and distance scaling
+    kernel_type: laplace            # laplace / rbf
+    dist_scale_mode: none           # none / sqrt_dim (recommended for high-dim actions)
+    rbf_sigma: 1.0                  # σ for RBF kernel (only used when kernel_type=rbf)
+    # P0: adaptive temperature tuning
+    adaptive_median_scale: 0.3      # multiplier for median distance
+    adaptive_min_temp: 0.01         # absolute minimum temperature
+    # P0: kernel observability
+    log_kernel_stats: true          # log kernel_max, kernel_mean, dist_median
+    log_kernel_every_n_steps: 100   # logging frequency
+    assert_alive_kernel: false      # warn if kernel_max < threshold
+    alive_kernel_threshold: 1.0e-6
 
 # ----------------------------------------------------------------------------
 # 观察配置 (observation)
@@ -185,10 +193,10 @@ observation:
   modalities:
     obs:
       low_dim:
-        - robot_states                  # (9D) 全部 proprio
+        - robot_states
       rgb:
-        - agentview_image               # 第三人称主相机 (映射到 agentview_rgb)
-        - eye_in_hand_image             # 手腕相机 (映射到 eye_in_hand_rgb)
+        - agentview_image
+        - eye_in_hand_image
       depth: []
       scan: []
     goal:
