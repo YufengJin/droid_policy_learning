@@ -19,3 +19,7 @@ algo:
     temp: 0.05
     max_drift: 0.1
     use_adaptive_temp: true
+    warmup_epochs: 200
+    max_drift_start: 0.3
+    max_drift_end: 0.05
+    max_drift_anneal_epochs: 2000

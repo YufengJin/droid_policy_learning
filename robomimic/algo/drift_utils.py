@@ -16,6 +16,7 @@ def compute_drift(
     kernel_type: str = "laplace",
     dist_scale_mode: str = "none",
     rbf_sigma: float = 1.0,
+    multiscale_sigmas: list = None,
 ) -> tuple:
     """
     Compute mean-shift drift field V(gen) using batch-normalized kernel.
@@ -32,6 +33,7 @@ def compute_drift(
         kernel_type: "laplace" or "rbf"
         dist_scale_mode: "none" or "sqrt_dim" (divide distances by sqrt(D))
         rbf_sigma: σ for RBF kernel
+        multiscale_sigmas: list of σ values for multiscale_rbf kernel
 
     Returns:
         V: Drift vectors [G, D]
@@ -50,7 +52,10 @@ def compute_drift(
         dist = dist / (D ** 0.5)
 
     # Compute kernel
-    if kernel_type == "rbf":
+    if kernel_type == "multiscale_rbf":
+        sigmas = multiscale_sigmas or [0.25, 0.5, 1.0, 2.0]
+        kernel = sum((-dist.pow(2) / (2.0 * s ** 2)).exp() for s in sigmas) / len(sigmas)
+    elif kernel_type == "rbf":
         kernel = (-dist.pow(2) / (2.0 * rbf_sigma ** 2)).exp()
     else:  # laplace (default)
         kernel = (-dist / temp).exp()

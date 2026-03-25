@@ -72,8 +72,8 @@ ls -1 "$DATA_ROOT/$ROBOCASA_SUBDIR" | head -n 5 || { echo "[WARN] dataset layout
 ################################################################################
 # 5) Apptainer 配置（参考 run_container.sh）
 ################################################################################
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-[[ -f "${SCRIPT_DIR}/.env.wandb" ]] && source "${SCRIPT_DIR}/.env.wandb"
+WANDB_ENV_FILE="${PROJECT_ROOT}/slurm/.env.wandb"
+[[ -f "$WANDB_ENV_FILE" ]] && source "$WANDB_ENV_FILE"
 [[ -n "${WANDB_API_KEY:-}" ]] && export APPTAINERENV_WANDB_API_KEY="$WANDB_API_KEY"
 
 CONTAINER_IMAGE="${APPTAINER_IMAGE:-$PROJECT_ROOT/droid_policy.sif}"

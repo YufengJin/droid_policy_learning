@@ -175,17 +175,28 @@ algo:
     max_drift: 0.1
     use_adaptive_temp: true
     # P0: kernel type and distance scaling
-    kernel_type: laplace            # laplace / rbf
+    kernel_type: laplace            # laplace / rbf / multiscale_rbf
     dist_scale_mode: none           # none / sqrt_dim (recommended for high-dim actions)
     rbf_sigma: 1.0                  # σ for RBF kernel (only used when kernel_type=rbf)
+    multiscale_sigmas: [0.25, 0.5, 1.0, 2.0]  # σ list for multiscale_rbf kernel
     # P0: adaptive temperature tuning
     adaptive_median_scale: 0.3      # multiplier for median distance
     adaptive_min_temp: 0.01         # absolute minimum temperature
     # P0: kernel observability
-    log_kernel_stats: true          # log kernel_max, kernel_mean, dist_median
+    log_kernel_stats: true          # log kernel_max, kernel_mean, dist_median, drift_alignment
     log_kernel_every_n_steps: 100   # logging frequency
     assert_alive_kernel: false      # warn if kernel_max < threshold
     alive_kernel_threshold: 1.0e-6
+    # Two-phase training: warmup with diffusion loss before drift
+    warmup_epochs: 200              # 0 = disabled; >0 = use diffusion loss for first N epochs
+    # Curriculum max-drift: anneal max_drift over training
+    max_drift_start: 0.3            # initial max_drift (large for early exploration)
+    max_drift_end: 0.05             # final max_drift (small for precision)
+    max_drift_anneal_epochs: 2000   # linear anneal over this many epochs; 0 = disabled
+    # Scheduled EMA decay
+    ema_decay_start: null            # null = disabled; e.g. 0.75 → fast early tracking
+    ema_decay_end: null              # e.g. 0.99 → stable late teacher
+    ema_decay_anneal_epochs: 0       # linear anneal over this many epochs
 
 # ----------------------------------------------------------------------------
 # 观察配置 (observation)
