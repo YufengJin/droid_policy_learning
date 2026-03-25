@@ -74,7 +74,7 @@ ACTION_SPACE="${ACTION_SPACE:-${ACTION_SPACES[$space_idx]}}"
 SEED="${SEED:-${SEEDS[$seed_idx]}}"
 
 NUM_EPOCHS="${NUM_EPOCHS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-64}"
+BATCH_SIZE="${BATCH_SIZE:-256}"
 WANDB_PROJ="action_space_comparison"
 
 echo "[INFO] Experiment: dataset=${DATASET} action_space=${ACTION_SPACE} seed=${SEED} epochs=${NUM_EPOCHS} batch=${BATCH_SIZE}"
@@ -107,7 +107,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "${SCRIPT_DIR}/.env.wandb" ]] && source "${SCRIPT_DIR}/.env.wandb"
 [[ -n "${WANDB_API_KEY:-}" ]] && export APPTAINERENV_WANDB_API_KEY="$WANDB_API_KEY"
 
-CONTAINER_IMAGE="${APPTAINER_IMAGE:-$PROJECT_ROOT/droid-policy.sif}"
+CONTAINER_IMAGE="${APPTAINER_IMAGE:-$PROJECT_ROOT/droid_policy.sif}"
 HOST_CODE_DIR="${DROID_PROJECT_DIR:-$PROJECT_ROOT}"
 HOST_FAKE_ROOT="${APPTAINER_FAKE_ROOT:-${WORK:-$HOME}/.apptainer_fake_root}"
 HOST_TMPDIR="${TMPDIR:-/tmp}"
@@ -115,7 +115,7 @@ HOST_HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}"
 
 if [[ ! -f "$CONTAINER_IMAGE" ]]; then
     echo "[ERR] Container image not found: $CONTAINER_IMAGE"
-    echo "请先构建: apptainer build droid-policy.sif apptainer/droid_policy.def"
+    echo "请先构建: apptainer build droid_policy.sif apptainer/droid_policy.def"
     exit 1
 fi
 
