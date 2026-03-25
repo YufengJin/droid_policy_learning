@@ -5,6 +5,11 @@
 # Dev Containers
 .devcontainer/
 
+# Local / agent / generated
+.robocasa/
+CLAUDE.md
+docs/
+
 # JetBrains / other IDEs
 .idea/
 

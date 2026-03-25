@@ -14,9 +14,16 @@ Supported HDF5 layouts:
     data/{demo}/obs/robot0_eef_pos                (T, 3)
     data/{demo}/obs/robot0_eef_quat               (T, 4)
     data/{demo}/obs/robot0_gripper_qpos           (T, 2)
-    data/{demo}/actions                           (T, 12) -> take first 7D
-    data/{demo}/action_dict/                      (optional)
+    data/{demo}/obs/robot0_joint_pos              (T, 7)   # present in v0.1; not default obs_keys
+    data/{demo}/obs/robot0_joint_vel              (T, 7)
+    data/{demo}/obs/robot0_gripper_qvel           (T, 2)
+    data/{demo}/actions                           (T, 12) -> this loader uses first 7D only
+    data/{demo}/action_dict/                      (optional; abs/rel pos/rot variants — **not read** here)
     data/{demo}.attrs["ep_meta"]                  (task_description in ep_meta)
+
+    Typical v0.1 files have **no** obs key for Cartesian EEF linear/angular velocity; joint
+    velocities are in robot0_joint_vel / robot0_gripper_qvel. Extra float obs keys load only
+    if listed in obs_keys (generic branch) and should be added to observation.modalities.
 
 2) Robosuite / Cosmos (legacy):
     data/{demo}/obs/robot0_agentview_left_rgb[_jpeg]
@@ -210,7 +217,7 @@ class RoboCasaDataset(torch.utils.data.Dataset):
     and supports sequence sampling with padding.
     """
 
-    ACTION_DIM = 7  # first 7 of 12D (ignore mobile base)
+    ACTION_DIM = 7  # first 7 of 12D (ignore mobile base) — kept for back-compat
     PROPRIO_DIM = 9
 
     def __init__(
@@ -228,6 +235,7 @@ class RoboCasaDataset(torch.utils.data.Dataset):
         normalize_actions=True,
         verbose=False,
         dataset_statistics_path=None,
+        action_space="pos_euler",
     ):
         """
         Args:
@@ -261,6 +269,7 @@ class RoboCasaDataset(torch.utils.data.Dataset):
         self.action_config = action_config or {}
         self.image_size = image_size
         self.normalize_actions = normalize_actions
+        self.action_space = action_space
 
         # ------------------------------------------------------------------
         # Discover HDF5 files
@@ -403,8 +412,10 @@ class RoboCasaDataset(torch.utils.data.Dataset):
                         self._lang_data[demo_idx] = obs_dict["_lang_str"]
                         del obs_dict["_lang_str"]
 
-                    # --- Actions (first 7 of 12D) ---
-                    actions = f["data/{}/actions".format(dk)][:, :self.ACTION_DIM].astype(np.float32)
+                    # --- Actions (first 7 of 12D, then convert to target action_space) ---
+                    from robomimic.utils.action_space_utils import convert_actions_from_euler
+                    raw_actions = f["data/{}/actions".format(dk)][:, :7].astype(np.float32)
+                    actions = convert_actions_from_euler(raw_actions, self.action_space)
 
                     T = actions.shape[0]
                     self.demos.append((fpath, dk))
@@ -439,17 +450,21 @@ class RoboCasaDataset(torch.utils.data.Dataset):
             # Effective data_dir for stats: parent dir when data_dir is a single file
             stats_data_dir = os.path.dirname(os.path.abspath(self.data_dir)) if os.path.isfile(self.data_dir) else self.data_dir
             demo_sig = ",".join(sorted("{}::{}".format(fp, dk) for fp, dk in self.demos))
-            cache_key = hashlib.md5(demo_sig.encode()).hexdigest()[:16]
+            cache_key = hashlib.md5("{}|{}".format(demo_sig, self.action_space).encode()).hexdigest()[:16]
             stats_filename = "dataset_statistics_{}.json".format(cache_key)
 
             if dataset_statistics_path is not None:
+                _resolved_stats_path = dataset_statistics_path
+                if self.action_space != "pos_euler":
+                    _base, _ext = os.path.splitext(_resolved_stats_path)
+                    _resolved_stats_path = "{}_{}{}".format(_base, self.action_space, _ext)
                 self._dataset_stats = load_or_compute_dataset_statistics(
                     data_dir=stats_data_dir,
                     data={i: {
                         "actions": self._action_data[i],
                         "proprio": _get_proprio(self._obs_data[i], self.demo_lengths[i]),
                     } for i in range(len(self.demos))},
-                    stats_path=dataset_statistics_path,
+                    stats_path=_resolved_stats_path,
                 )
             else:
                 self._dataset_stats = load_or_compute_dataset_statistics(

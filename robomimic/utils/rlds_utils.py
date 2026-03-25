@@ -1,17 +1,105 @@
 """Episode transforms for different RLDS datasets to canonical dataset definition."""
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
 import tensorflow as tf
 import torch
 import numpy as np
 import tensorflow_graphics.geometry.transformation as tfg
 
-def filter_success(trajectory: dict[str, any]):
-    # only keep trajectories that have "success" in the file path
-    return tf.strings.regex_full_match(
-        trajectory['traj_metadata']['episode_metadata']['file_path'][0],
-        ".*/success/.*"
-    )
+# Default for DROID RLDS when train.action_space is unset (preserves historical 10D pos+rot6d+gripper).
+RLDS_DROID_DEFAULT_ACTION_SPACE = "pos_rot6d"
+
+
+def resolve_rlds_droid_action_space(train_cfg) -> str:
+    """Return validated action_space for DROID RLDS; default pos_rot6d if missing."""
+    from robomimic.utils.action_space_utils import ACTION_SPACE_DIMS
+
+    raw = getattr(train_cfg, "action_space", None)
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return RLDS_DROID_DEFAULT_ACTION_SPACE
+    s = str(raw).strip()
+    if s not in ACTION_SPACE_DIMS:
+        raise ValueError(
+            "train.action_space must be one of {}; got {!r}".format(
+                list(ACTION_SPACE_DIMS.keys()), s
+            )
+        )
+    return s
+
+
+def rlds_droid_action_keys_and_shapes(action_space: str) -> Tuple[List[str], List[List[int]]]:
+    """action_keys / action_shapes aligned with make_droid_dataset_transform output layout."""
+    if action_space == "pos_rot6d":
+        return (
+            ["action/abs_pos", "action/abs_rot_6d", "action/gripper_position"],
+            [[1, 3], [1, 6], [1, 1]],
+        )
+    if action_space == "pos_euler":
+        return (
+            ["action/abs_pos", "action/abs_rot_euler", "action/gripper_position"],
+            [[1, 3], [1, 3], [1, 1]],
+        )
+    if action_space == "pos_axisangle":
+        return (
+            ["action/abs_pos", "action/abs_rot_axis_angle", "action/gripper_position"],
+            [[1, 3], [1, 3], [1, 1]],
+        )
+    raise ValueError("Unknown action_space: {}".format(action_space))
+
+
+def apply_rlds_droid_action_space_to_config(config) -> str:
+    """
+    Set config.train.action_space, action_keys, action_shapes for DROID RLDS.
+    Fills missing action_config entries needed for normalization / rollout.
+    """
+    action_space = resolve_rlds_droid_action_space(config.train)
+    keys, shapes = rlds_droid_action_keys_and_shapes(action_space)
+    defaults = {
+        "action/abs_pos": {"normalization": "min_max"},
+        "action/abs_rot_6d": {
+            "normalization": "min_max",
+            "format": "rot_6d",
+            "convert_at_runtime": "rot_euler",
+        },
+        "action/abs_rot_euler": {"normalization": "min_max", "format": "rot_euler"},
+        "action/abs_rot_axis_angle": {"normalization": "min_max"},
+        "action/gripper_position": {"normalization": "min_max"},
+    }
+    with config.values_unlocked():
+        config.train.action_space = action_space
+        config.train.action_keys = keys
+        config.train.action_shapes = shapes
+        ac = config.train.action_config
+        for k in keys:
+            if k not in ac:
+                if k not in defaults:
+                    raise KeyError(
+                        "action_config missing key {!r} and no default; add it to YAML".format(k)
+                    )
+                ac[k] = defaults[k]
+    return action_space
+
+
+def _np_euler_xyz_to_axis_angle(euler: np.ndarray) -> np.ndarray:
+    """Batch (..., 3) euler -> axis-angle rotvec; float32 out.
+
+    Uses intrinsic xyz convention (scipy lowercase "xyz") to match
+    tensorflow_graphics.rotation_matrix_3d.from_euler used by the other
+    DROID RLDS standardize functions (pos_rot6d, pos_euler).
+    """
+    from scipy.spatial.transform import Rotation as R
+
+    euler = np.asarray(euler, dtype=np.float64)
+    shape = euler.shape
+    flat = euler.reshape(-1, 3)
+    aa = R.from_euler("xyz", flat).as_rotvec().astype(np.float32)
+    return aa.reshape(shape)
+
+
+def _euler_to_axis_angle_tf(euler: tf.Tensor) -> tf.Tensor:
+    aa = tf.numpy_function(_np_euler_xyz_to_axis_angle, [euler], tf.float32)
+    aa.set_shape(euler.shape)
+    return aa
 
 
 def euler_to_rmat(euler):
@@ -25,19 +113,66 @@ def mat_to_rot6d(mat):
     return r6_flat
 
 
-def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
-    # every input feature is batched, ie has leading batch dimension
-    T = trajectory["action_dict"]["cartesian_position"][:, :3]
-    R = mat_to_rot6d(euler_to_rmat(trajectory["action_dict"]["cartesian_position"][:, 3:6]))
-    trajectory["action"] = tf.concat(
-        (
-            T,
-            R,
-            trajectory["action_dict"]["gripper_position"],
-        ),
-        axis=-1,
-    )
+def _droid_action_pos_euler_grip(trajectory: Dict[str, Any]):
+    cart = tf.cast(trajectory["action_dict"]["cartesian_position"], tf.float32)
+    T = cart[:, :3]
+    euler = cart[:, 3:6]
+    g = tf.cast(trajectory["action_dict"]["gripper_position"], tf.float32)
+    return T, euler, g
+
+
+# Separate top-level callables so Octo's get_dataset_statistics (inspect.getsource(standardize_fn))
+# produces different cache keys per action dimension; identical inner-function source would reuse 10D stats.
+def droid_standardize_pos_rot6d(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    T, euler, g = _droid_action_pos_euler_grip(trajectory)
+    R = mat_to_rot6d(euler_to_rmat(euler))
+    trajectory["action"] = tf.concat((T, R, g), axis=-1)
     return trajectory
+
+
+def droid_standardize_pos_euler(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    T, euler, g = _droid_action_pos_euler_grip(trajectory)
+    trajectory["action"] = tf.concat((T, euler, g), axis=-1)
+    return trajectory
+
+
+def droid_standardize_pos_axisangle(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    T, euler, g = _droid_action_pos_euler_grip(trajectory)
+    aa = _euler_to_axis_angle_tf(euler)
+    trajectory["action"] = tf.concat((T, aa, g), axis=-1)
+    return trajectory
+
+
+_DROID_STANDARDIZE_BY_SPACE = {
+    "pos_rot6d": droid_standardize_pos_rot6d,
+    "pos_euler": droid_standardize_pos_euler,
+    "pos_axisangle": droid_standardize_pos_axisangle,
+}
+
+
+def make_droid_dataset_transform(action_space: str):
+    """
+    RLDS standardize_fn for DROID: trajectory['action'] in the chosen space.
+
+    Source: cartesian_position [xyz, euler_xyz(3)], gripper_position (extrinsic XYZ euler).
+    """
+    try:
+        return _DROID_STANDARDIZE_BY_SPACE[action_space]
+    except KeyError:
+        raise ValueError("Unknown action_space: {}".format(action_space))
+
+
+def filter_success(trajectory: dict[str, any]):
+    # only keep trajectories that have "success" in the file path
+    return tf.strings.regex_full_match(
+        trajectory['traj_metadata']['episode_metadata']['file_path'][0],
+        ".*/success/.*"
+    )
+
+
+def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    """Backward-compatible default: pos_rot6d (10D), same as historical RLDS DROID pipeline."""
+    return droid_standardize_pos_rot6d(trajectory)
 
 
 def robomimic_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:

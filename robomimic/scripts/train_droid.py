@@ -60,12 +60,14 @@ from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
 from robomimic.utils.rlds_utils import (
-    droid_dataset_transform,
+    apply_rlds_droid_action_space_to_config,
+    make_droid_dataset_transform,
     robomimic_transform,
     DROID_TO_RLDS_OBS_KEY_MAP,
     DROID_TO_RLDS_LOW_DIM_OBS_KEY_MAP,
     TorchRLDSDataset,
 )
+from robomimic.utils.action_space_utils import get_rot_slice, get_rot_format_for_eval
 
 from octo.data.dataset import make_dataset_from_rlds, make_interleaved_dataset
 from octo.data.utils.data_utils import combine_dataset_statistics
@@ -186,11 +188,12 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
             print("")
         else:
             print(
-                "algo_name={}  train.batch_size={}  train.num_epochs={}  data_format={}  experiment.validate={}".format(
+                "algo_name={}  train.batch_size={}  train.num_epochs={}  data_format={}  train.action_space={}  experiment.validate={}".format(
                     config.algo_name,
                     config.train.batch_size,
                     config.train.num_epochs,
                     getattr(config.train, "data_format", "?"),
+                    getattr(config.train, "action_space", "?"),
                     config.experiment.validate,
                 )
             )
@@ -205,6 +208,7 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
         tf.config.set_visible_devices([], "GPU")
         obs_modalities = config.observation.modalities.obs.rgb
         assert len(obs_modalities) == 2
+        droid_rlds_action_space = apply_rlds_droid_action_space_to_config(config)
         ac_dim = sum([ac_comp[1] for ac_comp in config.train.action_shapes])
         action_config = config.train.action_config
         is_abs_action = [True] * ac_dim
@@ -220,7 +224,7 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
             "action_proprio_normalization_type": "bounds",
             "absolute_action_mask": is_abs_action,
             "action_normalization_mask": is_abs_action,
-            "standardize_fn": droid_dataset_transform,
+            "standardize_fn": make_droid_dataset_transform(droid_rlds_action_space),
         }
         dataset_names = config.train.dataset_names
         filter_functions = [
@@ -572,10 +576,25 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
                 actual_actions_np = TensorUtils.to_numpy(actual_actions)
                 predicted_pos = predicted_actions_np[..., :3]
                 actual_pos = actual_actions_np[..., :3]
-                predicted_rot = predicted_actions_np[..., 3:9]
-                actual_rot = actual_actions_np[..., 3:9]
+                rot_start, rot_end = get_rot_slice(droid_rlds_action_space)
+                rot_fmt = get_rot_format_for_eval(droid_rlds_action_space)
+                predicted_rot = predicted_actions_np[..., rot_start:rot_end]
+                actual_rot = actual_actions_np[..., rot_start:rot_end]
                 pos_err_stats = EvalUtils.compute_pos_err(predicted_pos, actual_pos)
-                rot_err_stats = EvalUtils.compute_rot_err(predicted_rot, actual_rot, rot_format="6d")
+                if rot_fmt == "euler":
+                    pred_rot_in = TorchUtils.euler_angles_to_matrix(
+                        torch.tensor(predicted_rot, dtype=torch.float32), "XYZ"
+                    )
+                    actual_rot_in = TorchUtils.euler_angles_to_matrix(
+                        torch.tensor(actual_rot, dtype=torch.float32), "XYZ"
+                    )
+                    rot_err_stats = EvalUtils.compute_rot_err(pred_rot_in, actual_rot_in, rot_format="matrix")
+                else:
+                    rot_err_stats = EvalUtils.compute_rot_err(
+                        torch.tensor(predicted_rot, dtype=torch.float32),
+                        torch.tensor(actual_rot, dtype=torch.float32),
+                        rot_format=rot_fmt,
+                    )
                 mse_log = {
                     "evaluate/cartesian_position_error/mean": pos_err_stats["mean"],
                     "evaluate/cartesian_position_error/max": pos_err_stats["max"],
@@ -631,6 +650,7 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
 def main():
     rank, world_size, local_rank, use_ddp = setup_ddp()
     _register_signal_handlers()
+    exit_code = 0
     try:
         config, debug = get_config_from_args()
         device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
@@ -645,11 +665,13 @@ def main():
         )
         res_str = "finished run successfully!"
     except Exception as e:
+        exit_code = 1
         res_str = "run failed with error:\n{}\n\n{}".format(e, traceback.format_exc())
     finally:
         cleanup_ddp()
     if rank == 0:
         print(res_str)
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

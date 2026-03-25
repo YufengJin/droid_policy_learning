@@ -700,6 +700,7 @@ class RolloutPolicy(object):
             ac_dict = AcUtils.vector_to_action_dict(ac, action_shapes=action_shapes, action_keys=action_keys)
             ac_dict = ObsUtils.unnormalize_dict(ac_dict, normalization_stats=self.action_normalization_stats)
             action_config = self.policy.global_config.train.action_config
+            did_runtime_conversion = False
             for key, value in ac_dict.items():
                 this_format = action_config[key].get("format", None)
                 if this_format == "rot_6d":
@@ -708,9 +709,20 @@ class RolloutPolicy(object):
                     if conversion_format == "rot_axis_angle":
                         rot = TorchUtils.rot_6d_to_axis_angle(rot_6d=rot_6d).squeeze().numpy()
                     elif conversion_format == "rot_euler":
-                        rot = TorchUtils.rot_6d_to_euler_angles(rot_6d=rot_6d, convention="XYZ").squeeze().numpy()
+                        rot = TorchUtils.rot_6d_to_euler_angles(rot_6d=rot_6d).squeeze().numpy()
                     else:
-                        raise ValueError
+                        raise ValueError(
+                            "Unknown convert_at_runtime format: {}".format(conversion_format)
+                        )
                     ac_dict[key] = rot
+                    did_runtime_conversion = True
             ac = AcUtils.action_dict_to_vector(ac_dict, action_keys=action_keys)
+            # Convert non-euler action spaces back to euler for env.step().
+            # Skip if convert_at_runtime already converted rot6d → euler/axis_angle
+            # (the vector dimensions have already changed).
+            if not did_runtime_conversion:
+                action_space = getattr(self.policy.global_config.train, "action_space", "pos_euler") or "pos_euler"
+                if action_space != "pos_euler":
+                    from robomimic.utils.action_space_utils import convert_actions_to_euler
+                    ac = convert_actions_to_euler(ac, source_space=action_space)
         return ac

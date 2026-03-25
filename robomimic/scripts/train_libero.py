@@ -57,6 +57,7 @@ from torch.utils.data.distributed import DistributedSampler
 from collections import OrderedDict
 
 import robomimic.utils.train_utils as TrainUtils
+import robomimic.utils.eval_utils as EvalUtils
 import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
@@ -66,6 +67,7 @@ from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
 from robomimic.utils.libero_dataset import LIBERODataset
+from robomimic.utils.action_space_utils import ACTION_SPACE_DIMS, get_rot_slice, get_rot_format_for_eval
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +273,13 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
         if isinstance(img_dim, (list, tuple)) and len(img_dim) >= 1:
             image_size = (img_dim[0], img_dim[1] if len(img_dim) > 1 else img_dim[0])
 
+    # Action space: pos_euler (7D, default) | pos_rot6d (10D) | pos_axisangle (7D)
+    action_space = getattr(config.train, "action_space", "pos_euler") or "pos_euler"
+    ac_dim = ACTION_SPACE_DIMS[action_space]
+    # Override action_shapes in config to match the actual ac_dim
+    with config.values_unlocked():
+        config.train.action_shapes = [[1, ac_dim]]
+
     trainset = LIBERODataset(
         data_dir=data_dir,
         obs_keys=all_obs_keys,
@@ -283,6 +292,7 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
         filter_key=config.train.hdf5_filter_key,
         image_size=image_size,
         normalize_actions=True,
+        action_space=action_space,
         **dbg_ds_kw,
     )
 
@@ -302,6 +312,7 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
                 filter_key=hdf5_validation_filter_key,
                 image_size=image_size,
                 normalize_actions=True,
+                action_space=action_space,
                 **dbg_ds_kw,
             )
         except Exception as e:
@@ -507,8 +518,36 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
                     actual_np = TensorUtils.to_numpy(actual_actions)
                     mse_all = float(np.mean((predicted_np - actual_np) ** 2))
                     mae_all = float(np.mean(np.abs(predicted_np - actual_np)))
-                    for k, v in {"evaluate/action_mse": mse_all, "evaluate/action_mae": mae_all}.items():
+                    # Per-component pos/rot metrics (respects action_space)
+                    pos_err_stats = EvalUtils.compute_pos_err(predicted_np[..., :3], actual_np[..., :3])
+                    rot_start, rot_end = get_rot_slice(action_space)
+                    rot_fmt = get_rot_format_for_eval(action_space)
+                    pred_rot = predicted_np[..., rot_start:rot_end]
+                    actual_rot = actual_np[..., rot_start:rot_end]
+                    if rot_fmt == "euler":
+                        pred_rot_in = TorchUtils.euler_angles_to_matrix(
+                            torch.tensor(pred_rot, dtype=torch.float32), "XYZ"
+                        )
+                        actual_rot_in = TorchUtils.euler_angles_to_matrix(
+                            torch.tensor(actual_rot, dtype=torch.float32), "XYZ"
+                        )
+                        rot_err_stats = EvalUtils.compute_rot_err(pred_rot_in, actual_rot_in, rot_format="matrix")
+                    else:
+                        rot_err_stats = EvalUtils.compute_rot_err(
+                            torch.tensor(pred_rot, dtype=torch.float32),
+                            torch.tensor(actual_rot, dtype=torch.float32),
+                            rot_format=rot_fmt,
+                        )
+                    mse_log = {
+                        "evaluate/action_mse": mse_all,
+                        "evaluate/action_mae": mae_all,
+                        "evaluate/cartesian_position_error/mean": pos_err_stats["mean"],
+                        "evaluate/rotation_error/mean": rot_err_stats["mean"],
+                    }
+                    for k, v in mse_log.items():
                         data_logger.record(k, v, epoch)
+                    print("MSE Log Epoch {}".format(epoch))
+                    print(json.dumps(mse_log, sort_keys=True, indent=4))
                 unwrapped.set_train()
 
         if is_main and video_paths and not ((should_save_ckpt and ckpt_reason != "valid") or config.experiment.keep_all_videos):

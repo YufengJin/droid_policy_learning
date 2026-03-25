@@ -283,7 +283,7 @@ class TrainedPolicyAdapter(BasePolicy):
                 if conv == "rot_axis_angle":
                     rot = TorchUtils.rot_6d_to_axis_angle(rot_6d=rot_6d)
                 elif conv == "rot_euler":
-                    rot = TorchUtils.rot_6d_to_euler_angles(rot_6d=rot_6d, convention="XYZ")
+                    rot = TorchUtils.rot_6d_to_euler_angles(rot_6d=rot_6d)
                 else:
                     raise ValueError(f"Unknown rot conversion: {conv}")
                 ac_dict[key] = rot.squeeze().numpy()

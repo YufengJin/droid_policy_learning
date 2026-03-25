@@ -169,6 +169,11 @@ train:
   shuffle_buffer_size: 50000   # 数据打乱缓冲区大小（帧数）
                                 # 在 train.py:127 中使用，传递给 make_interleaved_dataset
 
+  # DROID RLDS 动作表示（与 LIBERO/RoboCasa 的 train.action_space 一致）
+  # pos_rot6d (10D，默认，与历史 RLDS 管线一致) | pos_euler (7D) | pos_axisangle (7D)
+  # 覆盖示例：train.action_space=pos_euler
+  action_space: pos_rot6d
+
   # 训练超参数
   cuda: true              # 是否使用 CUDA (GPU)
                           # 在 train.py:70 和 547 中使用 TorchUtils.get_torch_device()
@@ -204,6 +209,7 @@ train:
       format: rot_6d                                      # 格式为 6D 旋转
       convert_at_runtime: rot_euler                       # 运行时转换为欧拉角
     action/abs_rot_euler: {normalization: min_max, format: rot_euler}  # 绝对旋转欧拉角
+    action/abs_rot_axis_angle: {normalization: min_max}   # pos_axisangle 时的轴角旋转 (3D)
     action/gripper_position: {normalization: min_max}      # 夹爪位置归一化
     action/cartesian_velocity: {normalization: null}      # 笛卡尔速度（不归一化）
     action/rel_pos: {normalization: null}                 # 相对位置（不归一化）

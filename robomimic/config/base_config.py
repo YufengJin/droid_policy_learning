@@ -204,6 +204,9 @@ class BaseConfig(Config):
 
         self.train.action_keys = ["actions"]
         self.train.action_shapes = [(1, 1)]
+        # Action space: pos_euler | pos_rot6d | pos_axisangle. None = let each training entrypoint
+        # pick its default (LIBERO/RoboCasa scripts use pos_euler; DROID RLDS uses pos_rot6d).
+        self.train.action_space = None
 
         # specifing each action keys to load and their corresponding normalization/conversion requirement
         # e.g. for dataset keys "action/eef_pos" and "action/eef_rot"

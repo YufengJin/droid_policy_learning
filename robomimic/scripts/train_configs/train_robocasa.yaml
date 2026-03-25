@@ -139,11 +139,15 @@ train:
 
   # RoboCasa 动作配置
   # 标准 robosuite/robocasa 动作空间：7D (3D pos + 3D rot + 1D gripper)
+  # action_space 控制旋转表示：pos_euler (7D, 默认) | pos_rot6d (10D) | pos_axisangle (7D)
+  # 训练时可通过 Hydra override 切换：train.action_space=pos_rot6d
+  action_space: pos_euler
+
   action_keys:
     - actions
 
   action_shapes:
-    - [1, 7]                   # actions: (batch, 7)
+    - [1, 7]                   # actions: (batch, ac_dim)；训练脚本会根据 action_space 自动覆盖
 
   action_config:
     actions: {normalization: min_max}

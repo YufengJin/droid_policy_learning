@@ -46,7 +46,14 @@ from robomimic.utils.dataset import action_stats_to_normalization_stats
 from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
-from robomimic.utils.rlds_utils import droid_dataset_transform, robomimic_transform, DROID_TO_RLDS_OBS_KEY_MAP, DROID_TO_RLDS_LOW_DIM_OBS_KEY_MAP, TorchRLDSDataset
+from robomimic.utils.rlds_utils import (
+    apply_rlds_droid_action_space_to_config,
+    make_droid_dataset_transform,
+    robomimic_transform,
+    DROID_TO_RLDS_OBS_KEY_MAP,
+    DROID_TO_RLDS_LOW_DIM_OBS_KEY_MAP,
+    TorchRLDSDataset,
+)
 
 from octo.data.dataset import make_dataset_from_rlds, make_interleaved_dataset
 from octo.data.utils.data_utils import combine_dataset_statistics
@@ -98,6 +105,7 @@ def train(config, device, debug=False):
         obs_modalities = config.observation.modalities.obs.rgb
         # NOTE: Must be 2 cam for now, can clean this up later
         assert(len(obs_modalities) == 2)
+        apply_rlds_droid_action_space_to_config(config)
         ac_dim = sum([ac_comp[1] for ac_comp in config.train.action_shapes])
         action_config = config.train.action_config
         is_abs_action = [True] * ac_dim
@@ -111,7 +119,7 @@ def train(config, device, debug=False):
                 "action_proprio_normalization_type": "bounds",
                 "absolute_action_mask": is_abs_action,
                 "action_normalization_mask": is_abs_action,
-                "standardize_fn": droid_dataset_transform,
+                "standardize_fn": make_droid_dataset_transform(config.train.action_space),
          }
 
         dataset_names = config.train.dataset_names

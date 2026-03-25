@@ -12,6 +12,12 @@ HDF5 layout:
     data/{demo}/obs/robot_states               (T, 9)   # preferred
     data/{demo}/robot_states                   (T, 9)   # some exports (e.g. libero_10) use demo root
     data/{demo}/actions                        (T, 7)
+
+    Many LIBERO exports (e.g. libero_10) also store under data/{demo}/obs/:
+    joint_states (T, 7), ee_pos (T, 3), ee_ori (T, 3), ee_states (T, 6) [= ee_pos||ee_ori],
+    gripper_states (T, 2). These are **not** loaded unless the key is listed in obs_keys;
+    the generic branch loads float datasets by name. There is typically **no** Cartesian
+    end-effector *velocity* array; actions are still OSC-style (T, 7), not joint space.
 """
 
 import os
@@ -74,6 +80,7 @@ class LIBERODataset(torch.utils.data.Dataset):
         normalize_actions=True,
         dataset_statistics_path=None,
         max_demos=None,
+        action_space="pos_euler",
     ):
         """
         Args:
@@ -108,6 +115,7 @@ class LIBERODataset(torch.utils.data.Dataset):
         self.normalize_actions = normalize_actions
         self._dataset_statistics_path = dataset_statistics_path
         self._max_demos = max_demos
+        self.action_space = action_space
 
         # ------------------------------------------------------------------
         # Discover HDF5 files
@@ -188,7 +196,9 @@ class LIBERODataset(torch.utils.data.Dataset):
                             else:
                                 raise KeyError("Obs key '{}' not found in {}".format(obs_key, fpath))
 
-                    actions = f["data/{}/actions".format(dk)][:].astype(np.float32)
+                    from robomimic.utils.action_space_utils import convert_actions_from_euler
+                    raw_actions = f["data/{}/actions".format(dk)][:].astype(np.float32)
+                    actions = convert_actions_from_euler(raw_actions, self.action_space)
 
                     T = actions.shape[0]
                     self.demos.append((fpath, dk))
@@ -209,13 +219,25 @@ class LIBERODataset(torch.utils.data.Dataset):
         # ------------------------------------------------------------------
         self._action_stats = None
         if self.normalize_actions:
+            # Use action_space-specific stats filename to avoid cross-contamination
+            import hashlib as _hashlib
+            _demo_sig = ",".join(sorted("{}::{}".format(fp, dk) for fp, dk in self.demos))
+            _cache_key = _hashlib.md5("{}|{}".format(_demo_sig, self.action_space).encode()).hexdigest()[:16]
+            _stats_filename = "dataset_statistics_{}.json".format(_cache_key)
+            # When an explicit stats path is provided, append action_space suffix to keep
+            # different action spaces from sharing the same stats file.
+            _resolved_stats_path = self._dataset_statistics_path
+            if _resolved_stats_path is not None and self.action_space != "pos_euler":
+                _base, _ext = os.path.splitext(_resolved_stats_path)
+                _resolved_stats_path = "{}_{}{}".format(_base, self.action_space, _ext)
             self._dataset_stats = load_or_compute_dataset_statistics(
                 data_dir=data_dir,
                 data={i: {"actions": self._action_data[i],
                            "proprio": self._obs_data[i].get("robot_states",
                                        np.zeros((self.demo_lengths[i], self.PROPRIO_DIM), dtype=np.float32))}
                        for i in range(len(self.demos))},
-                stats_path=self._dataset_statistics_path,
+                stats_path=_resolved_stats_path,
+                stats_filename=_stats_filename if _resolved_stats_path is None else None,
             )
             a_min = self._dataset_stats["actions_min"]
             a_max = self._dataset_stats["actions_max"]

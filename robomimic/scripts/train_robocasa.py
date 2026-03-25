@@ -66,6 +66,7 @@ from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
 from robomimic.utils.robocasa_dataset import RoboCasaDataset, get_unique_env_names_from_robocasa_data
+from robomimic.utils.action_space_utils import ACTION_SPACE_DIMS, get_rot_slice, get_rot_format_for_eval
 from robomimic.utils import robocasa_rollout_utils as RobocasaRolloutUtils
 
 
@@ -338,6 +339,13 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
     _stats_env = os.environ.get("ROBOCASA_DATASET_STATISTICS_PATH", "").strip()
     ds_stats_kw = {"dataset_statistics_path": os.path.expanduser(_stats_env)} if _stats_env else {}
 
+    # Action space: pos_euler (7D, default) | pos_rot6d (10D) | pos_axisangle (7D)
+    action_space = getattr(config.train, "action_space", "pos_euler") or "pos_euler"
+    ac_dim = ACTION_SPACE_DIMS[action_space]
+    # Override action_shapes in config to match the actual ac_dim
+    with config.values_unlocked():
+        config.train.action_shapes = [[1, ac_dim]]
+
     # 训练集
     trainset = RoboCasaDataset(
         data_dir=data_dir,
@@ -352,6 +360,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         image_size=image_size,
         normalize_actions=True,
         verbose=debug,
+        action_space=action_space,
         **ds_stats_kw,
     )
 
@@ -373,6 +382,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                 image_size=image_size,
                 normalize_actions=True,
                 verbose=debug,
+                action_space=action_space,
                 **ds_stats_kw,
             )
         except Exception as e:
@@ -877,18 +887,23 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                     predicted_pos = predicted_np[..., :3]
                     actual_pos = actual_np[..., :3]
                     pos_err_stats = EvalUtils.compute_pos_err(predicted_pos, actual_pos)
-                    # Rotation error (dims 3:6, euler) - convert to matrix for compute_rot_err
-                    predicted_rot = predicted_np[..., 3:6]
-                    actual_rot = actual_np[..., 3:6]
-                    pred_rot_mat = TorchUtils.euler_angles_to_matrix(
-                        torch.tensor(predicted_rot, dtype=torch.float32), "XYZ"
-                    )
-                    actual_rot_mat = TorchUtils.euler_angles_to_matrix(
-                        torch.tensor(actual_rot, dtype=torch.float32), "XYZ"
-                    )
-                    rot_err_stats = EvalUtils.compute_rot_err(
-                        pred_rot_mat, actual_rot_mat, rot_format="matrix"
-                    )
+                    # Rotation error — slice and format depend on action_space
+                    rot_start, rot_end = get_rot_slice(action_space)
+                    predicted_rot = predicted_np[..., rot_start:rot_end]
+                    actual_rot = actual_np[..., rot_start:rot_end]
+                    rot_fmt = get_rot_format_for_eval(action_space)
+                    if rot_fmt == "euler":
+                        pred_rot_in = TorchUtils.euler_angles_to_matrix(
+                            torch.tensor(predicted_rot, dtype=torch.float32), "XYZ"
+                        )
+                        actual_rot_in = TorchUtils.euler_angles_to_matrix(
+                            torch.tensor(actual_rot, dtype=torch.float32), "XYZ"
+                        )
+                        rot_err_stats = EvalUtils.compute_rot_err(pred_rot_in, actual_rot_in, rot_format="matrix")
+                    else:
+                        pred_rot_in = torch.tensor(predicted_rot, dtype=torch.float32)
+                        actual_rot_in = torch.tensor(actual_rot, dtype=torch.float32)
+                        rot_err_stats = EvalUtils.compute_rot_err(pred_rot_in, actual_rot_in, rot_format=rot_fmt)
                     mse_log = {
                         "evaluate/cartesian_position_error/mean": pos_err_stats["mean"],
                         "evaluate/cartesian_position_error/max": pos_err_stats["max"],

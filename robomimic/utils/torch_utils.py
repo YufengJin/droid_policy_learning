@@ -221,13 +221,20 @@ def rot_6d_to_axis_angle(rot_6d):
     rot = matrix_to_axis_angle(rot_mat)
     return rot
 
-def rot_6d_to_euler_angles(rot_6d):
+def rot_6d_to_euler_angles(rot_6d, convention="xyz"):
     """
     Converts tensor with rot_6d representation to euler representation.
+
+    Args:
+        rot_6d: (*, 6) tensor of 6D rotation representations.
+        convention: Euler convention string for scipy Rotation.as_euler().
+            Use lowercase for intrinsic rotations (e.g. "xyz"), uppercase for
+            extrinsic rotations (e.g. "XYZ").  Default "xyz" matches the
+            tensorflow_graphics convention used by the DROID RLDS pipeline.
     """
     rot_mat = rotation_6d_to_matrix(rot_6d)
     rot = scipy.spatial.transform.Rotation.from_matrix(rot_mat.numpy())
-    rot = rot.as_euler("xyz")
+    rot = rot.as_euler(convention)
     rot = torch.Tensor(rot)
     return rot
 
@@ -242,9 +249,9 @@ def axis_angle_to_rot_6d(axis_angle):
 
 def euler_angles_to_rot_6d(euler_angles, convention="XYZ"):
     """
-    Converts tensor with rot_6d representation to euler representation.
+    Converts euler angles to 6D rotation representation.
     """
-    rot_mat = euler_angles_to_matrix(euler_angles, convention="XYZ")
+    rot_mat = euler_angles_to_matrix(euler_angles, convention=convention)
     rot_6d = matrix_to_rotation_6d(rot_mat)
     return rot_6d
 
