@@ -81,10 +81,14 @@ echo "[INFO] Experiment: dataset=${DATASET} action_space=${ACTION_SPACE} seed=${
 
 ################################################################################
 # 4) 路径配置
+#    镜像与代码在 vault 时：请从仓库根目录 sbatch，使 SLURM_SUBMIT_DIR 指向 vault。
+#    亦可 export DROID_PROJECT_DIR=... / APPTAINER_IMAGE=... 覆盖。
 ################################################################################
-WORK_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning"
-PROJECT_ROOT="$WORK_DIR"
-OUTPUT_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning/outputs"
+SCRIPT_SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="${SLURM_SUBMIT_DIR:-$(cd "${SCRIPT_SLURM_DIR}/.." && pwd)}"
+WORK_DIR="${WORK_DIR:-/home/hpc/g108ea/g108ea10/repos/droid_policy_learning}"
+PROJECT_ROOT="${DROID_PROJECT_DIR:-$WORK_DIR}"
+OUTPUT_DIR="${PROJECT_ROOT}/outputs"
 
 # 数据集主机路径
 LIBERO_HOST_ROOT="${LIBERO_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/libero}"
@@ -134,7 +138,7 @@ BIND_ARGS="$BIND_ARGS -B ${HOST_TMPDIR}:/tmp"
 ################################################################################
 # 6) 按 dataset 分发训练
 ################################################################################
-cd "$WORK_DIR"
+cd "$PROJECT_ROOT"
 mkdir -p "$OUTPUT_DIR"
 
 case "$DATASET" in

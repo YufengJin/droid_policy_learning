@@ -38,9 +38,11 @@ export nointeractive=yes
 # 4) LIBERO 数据路径（直接使用源目录，不复制到 TMPDIR）
 #    覆盖：LIBERO_DATASET_DIR=/path/to/libero；LIBERO_SUBDIR=libero_10（子集，默认）
 ################################################################################
-WORK_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning"
-PROJECT_ROOT="$WORK_DIR"
-OUTPUT_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning/outputs"
+SCRIPT_SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="${SLURM_SUBMIT_DIR:-$(cd "${SCRIPT_SLURM_DIR}/.." && pwd)}"
+WORK_DIR="${WORK_DIR:-/home/hpc/g108ea/g108ea10/repos/droid_policy_learning}"
+PROJECT_ROOT="${DROID_PROJECT_DIR:-$WORK_DIR}"
+OUTPUT_DIR="${PROJECT_ROOT}/outputs"
 DATA_ROOT="${LIBERO_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/libero}"
 LIBERO_SUBDIR="${LIBERO_SUBDIR:-libero_10}"
 
@@ -105,7 +107,7 @@ LIBERO_MULTIRUN="${LIBERO_MULTIRUN:-1}"
 LIBERO_ALGOS="${LIBERO_ALGOS:-drift_policy diffusion_policy}"
 LIBERO_ALGO="${LIBERO_ALGO:-diffusion_policy}"
 
-cd "$WORK_DIR"
+cd "$PROJECT_ROOT"
 mkdir -p "$OUTPUT_DIR"
 
 if [[ "${LIBERO_MULTIRUN}" == "1" ]]; then

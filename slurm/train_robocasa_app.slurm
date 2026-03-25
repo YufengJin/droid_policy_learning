@@ -52,9 +52,11 @@ export nointeractive=yes
 #      v0.1/single_stage/kitchen_sink
 #      v0.1/single_stage/kitchen_stove
 ################################################################################
-WORK_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning"
-PROJECT_ROOT="$WORK_DIR"
-OUTPUT_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning/outputs"
+SCRIPT_SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="${SLURM_SUBMIT_DIR:-$(cd "${SCRIPT_SLURM_DIR}/.." && pwd)}"
+WORK_DIR="${WORK_DIR:-/home/hpc/g108ea/g108ea10/repos/droid_policy_learning}"
+PROJECT_ROOT="${DROID_PROJECT_DIR:-$WORK_DIR}"
+OUTPUT_DIR="${PROJECT_ROOT}/outputs"
 DATA_ROOT="${ROBOCASA_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/robocasa}"
 ROBOCASA_SUBDIR="${ROBOCASA_SUBDIR:-v0.1/multi_stage}"
 
@@ -121,7 +123,7 @@ ROBOCASA_MULTIRUN="${ROBOCASA_MULTIRUN:-1}"
 ROBOCASA_ALGOS="${ROBOCASA_ALGOS:-drift_policy diffusion_policy}"
 ROBOCASA_ALGO="${ROBOCASA_ALGO:-diffusion_policy}"
 
-cd "$WORK_DIR"
+cd "$PROJECT_ROOT"
 mkdir -p "$OUTPUT_DIR"
 
 if [[ "${ROBOCASA_MULTIRUN}" == "1" ]]; then

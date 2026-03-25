@@ -38,9 +38,11 @@ export nointeractive=yes
 # 4) DROID RLDS 数据路径（直接使用源目录，不复制到 TMPDIR）
 #    覆盖：export DROID_DATASET_DIR=/path/to/droid_rlds
 ################################################################################
-WORK_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning"
-PROJECT_ROOT="$WORK_DIR"
-OUTPUT_DIR="/home/hpc/g108ea/g108ea10/repos/droid_policy_learning/outputs"
+SCRIPT_SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="${SLURM_SUBMIT_DIR:-$(cd "${SCRIPT_SLURM_DIR}/.." && pwd)}"
+WORK_DIR="${WORK_DIR:-/home/hpc/g108ea/g108ea10/repos/droid_policy_learning}"
+PROJECT_ROOT="${DROID_PROJECT_DIR:-$WORK_DIR}"
+OUTPUT_DIR="${PROJECT_ROOT}/outputs"
 DATA_ROOT="${DROID_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/droid}"
 # RLDS 子集，对应 train_rlds.yaml 中 dataset_names，如 [insert_pin]、[droid_100]
 DATASET_NAMES="${DROID_DATASET_NAMES:-insert_pin}"
@@ -97,7 +99,7 @@ echo "  $DATA_ROOT -> $CONT_DROID (ro)"
 # 6) 启动训练（train_droid 使用 train_rlds.yaml，RLDS 格式）
 #    覆盖：DROID_DATASET_NAMES="droid_100 role_ros2" 等
 ################################################################################
-cd "$WORK_DIR"
+cd "$PROJECT_ROOT"
 mkdir -p "$OUTPUT_DIR"
 
 echo "[INFO] Starting DROID training at $(date +'%F %T')"
