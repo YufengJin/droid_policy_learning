@@ -1,201 +1,265 @@
 """
-This file contains utility classes and functions for logging to stdout, stderr,
-and to tensorboard.
+Logging utilities for robomimic: stdout/stderr redirection, TensorBoard, and W&B.
+
+The main entry point is `DataLogger`, a thin facade that fans out a single
+`record(...)` call to TensorBoard (via tensorboardX) and/or Weights & Biases.
+Both backends are optional and independent.
 """
+from __future__ import annotations
+
 import os
 import sys
-import numpy as np
-from datetime import datetime
-from contextlib import contextmanager
-import textwrap
 import time
-from tqdm import tqdm
+import textwrap
+from contextlib import contextmanager
+from datetime import datetime
+from typing import Any, Mapping, Optional
+
+import numpy as np
 from termcolor import colored
+from tqdm import tqdm
 
 import robomimic
 
-# global list of warning messages can be populated with @log_warning and flushed with @flush_warnings
-WARNINGS_BUFFER = []
+# Global warning buffer; populated via @log_warning, drained via @flush_warnings.
+WARNINGS_BUFFER: list[str] = []
 
 
-class PrintLogger(object):
-    """
-    This class redirects print statements to both console and a file.
-    """
-    def __init__(self, log_file):
+class PrintLogger:
+    """Tee `print()` output to both terminal and a file."""
+
+    def __init__(self, log_file: str):
         self.terminal = sys.stdout
         print('STDOUT will be forked to %s' % log_file)
         self.log_file = open(log_file, "a")
 
-    def write(self, message):
+    def write(self, message: str) -> None:
         self.terminal.write(message)
         self.log_file.write(message)
         self.log_file.flush()
 
-    def flush(self):
-        # this flush method is needed for python 3 compatibility.
-        # this handles the flush command by doing nothing.
-        # you might want to specify some extra behavior here.
+    def flush(self) -> None:
+        # Required for python3 stdio compatibility; intentional no-op.
         pass
 
 
-class DataLogger(object):
+class DataLogger:
     """
-    Logging class to log metrics to tensorboard and/or retrieve running statistics about logged data.
+    Unified TB + W&B logging facade.
+
+    Both backends are optional. Disabling both makes record() a no-op aside
+    from running-stats accumulation.
+
+    Public API:
+        record(key, value, step, data_type='scalar', log_stats=False)
+        record_dict({key: value, ...}, step)
+        log_text(key, message, step)
+        get_stats(key)
+        close()
     """
-    def __init__(self, log_dir, config, log_tb=True, log_wandb=False):
-        """
-        Args:
-            log_dir (str): base path to store logs
-            log_tb (bool): whether to use tensorboard logging
-        """
+
+    def __init__(
+        self,
+        log_dir: str,
+        config: Any,
+        log_tb: bool = True,
+        log_wandb: bool = False,
+        wandb_init_retries: int = 10,
+        wandb_init_backoff_seconds: float = 30.0,
+    ):
         self._tb_logger = None
         self._wandb_logger = None
-        self._data = dict() # store all the scalar data logged so far
+        self._data: dict[str, list[float]] = {}
 
         if log_tb:
             from tensorboardX import SummaryWriter
             self._tb_logger = SummaryWriter(os.path.join(log_dir, 'tb'))
 
         if log_wandb:
-            import wandb
-            import robomimic.macros as Macros
-            
-            # set up wandb api key if specified in macros
-            if Macros.WANDB_API_KEY is not None:
-                os.environ["WANDB_API_KEY"] = Macros.WANDB_API_KEY
+            self._init_wandb(
+                log_dir=log_dir,
+                config=config,
+                retries=wandb_init_retries,
+                backoff=wandb_init_backoff_seconds,
+            )
 
-            assert Macros.WANDB_ENTITY is not None, "WANDB_ENTITY macro is set to None." \
-                    "\nSet this macro in {base_path}/macros_private.py" \
-                    "\nIf this file does not exist, first run python {base_path}/scripts/setup_macros.py".format(base_path=robomimic.__path__[0])
-            
-            # attempt to set up wandb 10 times. If unsuccessful after these trials, don't use wandb
-            num_attempts = 10
-            for attempt in range(num_attempts):
-                try:
-                    # set up wandb
-                    self._wandb_logger = wandb
+    # ---------- wandb init ----------
 
-                    self._wandb_logger.init(
-                        entity=Macros.WANDB_ENTITY,
-                        project=config.experiment.logging.wandb_proj_name,
-                        name=config.experiment.name,
-                        dir=log_dir,
-                        mode=("offline" if attempt == num_attempts - 1 else "online"),
-                    )
+    def _init_wandb(self, log_dir: str, config: Any, retries: int, backoff: float) -> None:
+        import wandb
+        import robomimic.macros as Macros
 
-                    # log full config to wandb (train.py / train_ddp.py / train_rlds.py all use this DataLogger)
-                    if hasattr(config, "to_dict") and callable(getattr(config, "to_dict")):
-                        full_config_dict = config.to_dict()
-                        self._wandb_logger.config.update(full_config_dict, allow_val_change=True)
-                    else:
-                        # fallback: meta + hp + algo (original behavior)
-                        wandb_config = {k: v for (k, v) in config.meta.items() if k not in ["hp_keys", "hp_values"]}
-                        for (k, v) in zip(config.meta["hp_keys"], config.meta["hp_values"]):
-                            wandb_config[k] = v
-                        if "algo" not in wandb_config:
-                            wandb_config["algo"] = config.algo_name
-                        self._wandb_logger.config.update(wandb_config)
+        if Macros.WANDB_API_KEY is not None:
+            os.environ["WANDB_API_KEY"] = Macros.WANDB_API_KEY
 
-                    break
-                except Exception as e:
-                    log_warning("wandb initialization error (attempt #{}): {}".format(attempt + 1, e))
-                    self._wandb_logger = None
-                    time.sleep(30)
+        assert Macros.WANDB_ENTITY is not None, (
+            "WANDB_ENTITY macro is set to None.\n"
+            "Set this macro in {base}/macros_private.py\n"
+            "If this file does not exist, first run python {base}/scripts/setup_macros.py".format(
+                base=robomimic.__path__[0],
+            )
+        )
 
-    def record(self, k, v, epoch, data_type='scalar', log_stats=False):
+        for attempt in range(retries):
+            try:
+                self._wandb_logger = wandb
+                self._wandb_logger.init(
+                    entity=Macros.WANDB_ENTITY,
+                    project=config.experiment.logging.wandb_proj_name,
+                    name=config.experiment.name,
+                    dir=log_dir,
+                    mode=("offline" if attempt == retries - 1 else "online"),
+                )
+                self._sync_wandb_config(config)
+                break
+            except Exception as e:
+                log_warning("wandb initialization error (attempt #{}): {}".format(attempt + 1, e))
+                self._wandb_logger = None
+                time.sleep(backoff)
+
+    def _sync_wandb_config(self, config: Any) -> None:
+        """Push experiment config into wandb.config for searchable comparisons."""
+        if self._wandb_logger is None:
+            return
+        try:
+            if hasattr(config, "to_dict") and callable(getattr(config, "to_dict")):
+                self._wandb_logger.config.update(config.to_dict(), allow_val_change=True)
+                return
+        except Exception as e:
+            log_warning("wandb config.to_dict() failed: {}; falling back to meta+hp".format(e))
+
+        # Legacy fallback: meta + hp_keys/hp_values + algo
+        wandb_config = {k: v for (k, v) in config.meta.items() if k not in ["hp_keys", "hp_values"]}
+        for (k, v) in zip(config.meta["hp_keys"], config.meta["hp_values"]):
+            wandb_config[k] = v
+        if "algo" not in wandb_config:
+            wandb_config["algo"] = config.algo_name
+        self._wandb_logger.config.update(wandb_config)
+
+    # ---------- record API ----------
+
+    def record(
+        self,
+        k: str,
+        v: Any,
+        step: Optional[int] = None,
+        data_type: str = 'scalar',
+        log_stats: bool = False,
+        *,
+        epoch: Optional[int] = None,
+    ) -> None:
         """
-        Record data with logger.
         Args:
-            k (str): key string
-            v (float or image): value to store
-            epoch: current epoch number
-            data_type (str): the type of data. either 'scalar' or 'image'
-            log_stats (bool): whether to store the mean/max/min/std for all data logged so far with key k
+            k: metric key.
+            v: scalar float, or HxWxC / NxHxWxC ndarray for images.
+            step: global step (iteration / epoch). Wins over `epoch` if both given.
+            data_type: 'scalar' | 'image'.
+            log_stats: scalar-only — also write running mean/std/min/max.
+            epoch: deprecated alias for `step`; preserved for backward compatibility.
         """
-
-        assert data_type in ['scalar', 'image']
+        if step is None:
+            step = epoch
+        assert step is not None, "record() requires `step` (or legacy `epoch`)"
+        assert data_type in ('scalar', 'image'), "unknown data_type: {}".format(data_type)
 
         if data_type == 'scalar':
-            # maybe update internal cache if logging stats for this key
-            if log_stats or k in self._data: # any key that we're logging or previously logged
-                if k not in self._data:
-                    self._data[k] = []
-                self._data[k].append(v)
+            self._cache_if_needed(k, v, log_stats)
+            self._log_scalar(k, v, step)
+            if log_stats:
+                self._log_stats(k, step)
+        else:  # image
+            self._log_image(k, v, step)
 
-        # maybe log to tensorboard
+    def record_dict(
+        self,
+        metrics: Mapping[str, Any],
+        step: int,
+        data_type: str = 'scalar',
+        log_stats: bool = False,
+    ) -> None:
+        """Batch-record many keys at the same step."""
+        for k, v in metrics.items():
+            self.record(k, v, step=step, data_type=data_type, log_stats=log_stats)
+
+    def log_text(self, k: str, msg: str, step: int) -> None:
+        """Log a text annotation (e.g. release notes, command, eval breakdown)."""
         if self._tb_logger is not None:
-            if data_type == 'scalar':
-                self._tb_logger.add_scalar(k, v, epoch)
-                if log_stats:
-                    stats = self.get_stats(k)
-                    for (stat_k, stat_v) in stats.items():
-                        stat_k_name = '{}-{}'.format(k, stat_k)
-                        self._tb_logger.add_scalar(stat_k_name, stat_v, epoch)
-            elif data_type == 'image':
-                if len(v.shape) == 3:
-                    v = v[None, ...]
-                self._tb_logger.add_images(k, img_tensor=v, global_step=epoch, dataformats="NHWC")
-
+            self._tb_logger.add_text(k, msg, global_step=step)
         if self._wandb_logger is not None:
             try:
-                if data_type == 'scalar':
-                    self._wandb_logger.log({k: v}, step=epoch)
-                    if log_stats:
-                        stats = self.get_stats(k)
-                        for (stat_k, stat_v) in stats.items():
-                            self._wandb_logger.log({stat_k: stat_v}, step=epoch)
-                elif data_type == 'image':
-                    import wandb
-                    self._wandb_logger.log({k: wandb.Image(v)}, step=epoch)
+                self._wandb_logger.log({k: msg}, step=step)
             except Exception as e:
-                log_warning("wandb logging: {}".format(e))
+                log_warning("wandb text log: {}".format(e))
 
-    def get_stats(self, k):
-        """
-        Computes running statistics for a particular key.
-        Args:
-            k (str): key string
-        Returns:
-            stats (dict): dictionary of statistics
-        """
-        stats = dict()
-        stats['mean'] = np.mean(self._data[k])
-        stats['std'] = np.std(self._data[k])
-        stats['min'] = np.min(self._data[k])
-        stats['max'] = np.max(self._data[k])
-        return stats
+    # ---------- private writers ----------
 
-    def close(self):
-        """
-        Run before terminating to make sure all logs are flushed
-        """
+    def _cache_if_needed(self, k: str, v: float, log_stats: bool) -> None:
+        # Once a key has been requested with stats, keep accumulating it forever
+        # (matches legacy semantics so get_stats(k) can be called any time later).
+        if log_stats or k in self._data:
+            self._data.setdefault(k, []).append(v)
+
+    def _log_scalar(self, k: str, v: float, step: int) -> None:
+        if self._tb_logger is not None:
+            self._tb_logger.add_scalar(k, v, step)
+        if self._wandb_logger is not None:
+            try:
+                self._wandb_logger.log({k: v}, step=step)
+            except Exception as e:
+                log_warning("wandb scalar log: {}".format(e))
+
+    def _log_stats(self, k: str, step: int) -> None:
+        for stat_k, stat_v in self.get_stats(k).items():
+            full_key = "{}-{}".format(k, stat_k)
+            if self._tb_logger is not None:
+                self._tb_logger.add_scalar(full_key, stat_v, step)
+            if self._wandb_logger is not None:
+                try:
+                    self._wandb_logger.log({full_key: stat_v}, step=step)
+                except Exception as e:
+                    log_warning("wandb stats log: {}".format(e))
+
+    def _log_image(self, k: str, v: np.ndarray, step: int) -> None:
+        if v.ndim == 3:
+            v = v[None, ...]
+        if self._tb_logger is not None:
+            self._tb_logger.add_images(k, img_tensor=v, global_step=step, dataformats="NHWC")
+        if self._wandb_logger is not None:
+            try:
+                import wandb
+                self._wandb_logger.log({k: wandb.Image(v)}, step=step)
+            except Exception as e:
+                log_warning("wandb image log: {}".format(e))
+
+    # ---------- stats / lifecycle ----------
+
+    def get_stats(self, k: str) -> dict[str, float]:
+        arr = self._data[k]
+        return {
+            'mean': float(np.mean(arr)),
+            'std':  float(np.std(arr)),
+            'min':  float(np.min(arr)),
+            'max':  float(np.max(arr)),
+        }
+
+    def close(self) -> None:
         if self._tb_logger is not None:
             self._tb_logger.close()
-
         if self._wandb_logger is not None:
             self._wandb_logger.finish()
 
 
 class custom_tqdm(tqdm):
-    """
-    Small extension to tqdm to make a few changes from default behavior.
-    By default tqdm writes to stderr. Instead, we change it to write
-    to stdout.
-    """
+    """tqdm that writes to stdout (default writes stderr) so it tees with PrintLogger."""
+
     def __init__(self, *args, **kwargs):
         assert "file" not in kwargs
-        super(custom_tqdm, self).__init__(*args, file=sys.stdout, **kwargs)
+        super().__init__(*args, file=sys.stdout, **kwargs)
 
 
 @contextmanager
 def silence_stdout():
-    """
-    This contextmanager will redirect stdout so that nothing is printed
-    to the terminal. Taken from the link below:
-
-    https://stackoverflow.com/questions/6735917/redirecting-stdout-to-nothing-in-python
-    """
+    """Temporarily redirect stdout to /dev/null."""
     old_target = sys.stdout
     try:
         with open(os.devnull, "w") as new_target:
@@ -205,30 +269,20 @@ def silence_stdout():
         sys.stdout = old_target
 
 
-def log_warning(message, color="yellow", print_now=True):
-    """
-    This function logs a warning message by recording it in a global warning buffer.
-    The global registry will be maintained until @flush_warnings is called, at
-    which point the warnings will get printed to the terminal.
-
-    Args:
-        message (str): warning message to display
-        color (str): color of message - defaults to "yellow"
-        print_now (bool): if True (default), will print to terminal immediately, in
-            addition to adding it to the global warning buffer
-    """
+def log_warning(message: str, color: str = "yellow", print_now: bool = True) -> None:
+    """Buffer a colored warning; optionally also print immediately."""
     global WARNINGS_BUFFER
-    buffer_message = colored("ROBOMIMIC WARNING(\n{}\n)".format(textwrap.indent(message, "    ")), color)
+    buffer_message = colored(
+        "ROBOMIMIC WARNING(\n{}\n)".format(textwrap.indent(message, "    ")),
+        color,
+    )
     WARNINGS_BUFFER.append(buffer_message)
     if print_now:
         print(buffer_message)
 
 
-def flush_warnings():
-    """
-    This function flushes all warnings from the global warning buffer to the terminal and
-    clears the global registry.
-    """
+def flush_warnings() -> None:
+    """Print and clear the warning buffer."""
     global WARNINGS_BUFFER
     for msg in WARNINGS_BUFFER:
         print(msg)
