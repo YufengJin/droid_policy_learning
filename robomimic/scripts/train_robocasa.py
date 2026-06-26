@@ -60,14 +60,12 @@ import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.vis_utils as VisUtils
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
-import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.file_utils as FileUtils
 from robomimic.config import config_factory
-from robomimic.algo import algo_factory, RolloutPolicy
+from robomimic.algo import algo_factory
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
-from robomimic.utils.robocasa_dataset import RoboCasaDataset, get_unique_env_names_from_robocasa_data
+from robomimic.utils.robocasa_dataset import RoboCasaDataset
 from robomimic.utils.action_space_utils import ACTION_SPACE_DIMS, get_rot_slice, get_rot_format_for_eval
-from robomimic.utils import robocasa_rollout_utils as RobocasaRolloutUtils
 
 
 def _robocasa_collate_fn(batch):
@@ -96,15 +94,6 @@ def _robocasa_collate_fn(batch):
                 out[k] = [b[k] for b in batch]
         return out
     return torch.utils.data.dataloader.default_collate(batch)
-
-
-def _get_rollout_img_res(config, rollout_cfg):
-    """Use observation.image_dim to match training resolution; fallback to rollout.img_res."""
-    if hasattr(config.observation, "image_dim") and config.observation.image_dim:
-        dim = config.observation.image_dim
-        if isinstance(dim, (list, tuple)) and len(dim) >= 1:
-            return int(dim[0])
-    return getattr(rollout_cfg, "img_res", 128)
 
 
 # ---------------------------------------------------------------------------
@@ -190,13 +179,25 @@ def get_config_from_args():
 
     # Hydra 专用键不传给 robomimic（robomimic config 为 key-locked，未知 key 会导致 update 失败）
     _HYDRA_ONLY_KEYS = ("load_from", "debug", "resume")
+    # 顶层 resume 是便捷开关：capture 后映射到 experiment.resume（见下方 config 构建后应用）
+    _top_resume = cfg_dict.get("resume", None)
     for _k in _HYDRA_ONLY_KEYS:
         cfg_dict.pop(_k, None)
 
     config = config_factory(cfg_dict["algo_name"])
-    # RoboCasa: 注入 rollout 默认键，使 YAML 可覆盖，避免 base_config 被 RoboCasa 专用项污染
-    from robomimic.utils.robocasa_rollout_utils import ROBOCASA_ROLLOUT_CONFIG_DEFAULTS
-    for _k, _v in ROBOCASA_ROLLOUT_CONFIG_DEFAULTS.items():
+    # RoboCasa: 注入 rollout 默认键，使含 rollout.* 的 YAML 仍能通过 config.update 加载，
+    # 避免 base_config 被 RoboCasa 专用项污染。rollout 已从训练中移除（评测走 client/server，
+    # 见 robomimic.scripts.policy_server + benchmarks/robocasa/scripts/run_eval.py），
+    # 这里内联同一组默认键，仅保留 config 加载兼容性。
+    _ROBOCASA_ROLLOUT_CONFIG_DEFAULTS = {
+        "layout_and_style_ids": None,
+        "obj_instance_split": "B",
+        "img_res": 128,
+        "num_wait_steps": 10,
+        "robots": "PandaMobile",
+        "parallel_workers": 1,
+    }
+    for _k, _v in _ROBOCASA_ROLLOUT_CONFIG_DEFAULTS.items():
         config.experiment.rollout.setdefault(_k, _v)
     with config.values_unlocked():
         config.update(cfg_dict)
@@ -213,6 +214,10 @@ def get_config_from_args():
     for _mk in _modality_keys:
         if _mk not in _goal_cfg:
             config.observation.modalities.goal[_mk] = []
+
+    # 顶层 resume=true 便捷开关 → experiment.resume（experiment.resume 也可直接覆盖）
+    if _top_resume is not None and bool(_top_resume):
+        config.experiment.resume = True
 
     # 未指定实验名时：{algo}_{dataset}_{timestamp}，例如 diffusion_policy_droid_100_20260129_085414
     exp_name = config.experiment.name
@@ -481,113 +486,22 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         )
 
     # -----------------------------------------------------------------------
-    # 环境：仅 rank 0 创建，用于 rollout 评估与录视频
-    # 根据 dataset 中的 env name 创建对应环境；若 config.experiment.env 有值则覆盖
+    # 评测改为 client/server（见 robomimic.scripts.policy_server +
+    # benchmarks/robocasa/scripts/run_eval.py），训练循环不再建仿真环境、不做 in-process rollout。
     # -----------------------------------------------------------------------
-    if config.experiment.env is not None:
-        env_meta["env_name"] = config.experiment.env
-
-    envs = OrderedDict()
-    if config.experiment.rollout.enabled and is_main:
-        env_names = [env_meta["env_name"]]
-        if config.experiment.env is None:
-            # Create envs from unique env names in the dataset
-            dataset_env_names = get_unique_env_names_from_robocasa_data(
-                data_dir, filter_key=config.train.hdf5_filter_key
-            )
-            if dataset_env_names:
-                env_names = dataset_env_names
-                if is_main:
-                    print(">> Rollout envs (from dataset): {}".format(env_names))
-            elif is_main:
-                print(">> No env names found in dataset, using env_meta['env_name']={}".format(env_meta["env_name"]))
-        if config.experiment.additional_envs is not None:
-            for ae in config.experiment.additional_envs:
-                if ae not in env_names:
-                    env_names.append(ae)
-        robocasa_style = getattr(config.experiment.rollout, "robocasa_style", False)
-        rollout_cfg = config.experiment.rollout
-        rollout_img_res = _get_rollout_img_res(config, rollout_cfg)
-
-        for env_name in env_names:
-            try:
-                if robocasa_style:
-                    env = RobocasaRolloutUtils.create_robocasa_env_for_rollout(
-                        env_name=env_name,
-                        robots=getattr(rollout_cfg, "robots", "PandaMobile"),
-                        img_res=rollout_img_res,
-                        obj_instance_split=getattr(rollout_cfg, "obj_instance_split", "B"),
-                        layout_and_style_ids=getattr(
-                            rollout_cfg, "layout_and_style_ids", "((1,1),(2,2),(4,4),(6,9),(7,10))"
-                        ),
-                        seed=config.train.seed,
-                        episode_idx=None,
-                        use_image_obs=shape_meta["use_images"],
-                        postprocess_visual_obs=True,
-                    )
-                    env = EnvUtils.wrap_env_from_config(env, config=config)
-                else:
-                    env = EnvUtils.create_env_from_metadata(
-                        env_meta=env_meta,
-                        env_name=env_name,
-                        render=False,
-                        render_offscreen=config.experiment.render_video,
-                        use_image_obs=shape_meta["use_images"],
-                    )
-                    env = EnvUtils.wrap_env_from_config(env, config=config)
-                envs[env.name] = env
-            except Exception as e:
-                if is_main:
-                    print(">> WARNING: Failed to create env '{}': {}. Skipping.".format(env_name, e))
-        if len(envs) == 0 and is_main:
-            print(">> Rollout SKIPPED: no envs could be created. Set experiment.env='PnPCounterToCab' (or another task) to enable rollout.")
 
     # -----------------------------------------------------------------------
-    # 并行 rollout 时预创建 env 池，避免每次 rollout 重复创建/销毁
+    # ckpt 预加载（仅一次）：resume 时先取出 wandb_run_id，供 DataLogger 续接同一 run
     # -----------------------------------------------------------------------
-    env_pools = None
-    if (
-        config.experiment.rollout.enabled
-        and is_main
-        and len(envs) > 0
-        and getattr(config.experiment.rollout, "robocasa_style", False)
-    ):
-        parallel_workers = getattr(config.experiment.rollout, "parallel_workers", 1)
-        num_episodes = getattr(config.experiment.rollout, "n", 5)
-        n_workers = min(parallel_workers, num_episodes) if parallel_workers > 1 else 1
-        if n_workers > 1:
-            env_pools = OrderedDict()
-            rollout_cfg = config.experiment.rollout
-            t_create = time.time()
-            for env_name, main_env in envs.items():
-                pool = [main_env]
-                for w_i in range(n_workers - 1):
-                    try:
-                        extra = RobocasaRolloutUtils.create_robocasa_env_for_rollout(
-                            env_name=env_name,
-                            robots=getattr(rollout_cfg, "robots", "PandaMobile"),
-                            img_res=rollout_img_res,
-                            obj_instance_split=getattr(rollout_cfg, "obj_instance_split", "B"),
-                            layout_and_style_ids=getattr(
-                                rollout_cfg, "layout_and_style_ids", "((1,1),(2,2),(4,4),(6,9),(7,10))"
-                            ),
-                            seed=config.train.seed,
-                            episode_idx=None,
-                            use_image_obs=shape_meta["use_images"],
-                            postprocess_visual_obs=True,
-                        )
-                        pool.append(EnvUtils.wrap_env_from_config(extra, config=config))
-                    except Exception as e:
-                        print(">> WARNING: Pre-create extra env failed ({} worker {}): {}. Using {} envs.".format(
-                            env_name, w_i + 1, e, len(pool)))
-                        break
-                env_pools[env_name] = pool
-            print(">> Pre-created env pools: {} envs total ({} tasks x {} workers) in {:.1f}s".format(
-                sum(len(p) for p in env_pools.values()),
-                len(env_pools),
-                n_workers,
-                time.time() - t_create,
-            ))
+    ckpt_path = config.experiment.ckpt_path
+    resume = getattr(config.experiment, "resume", False)
+    ckpt_dict = None
+    resume_wandb_run_id = None
+    if ckpt_path is not None:
+        from robomimic.utils.file_utils import maybe_dict_from_checkpoint
+        ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
+        if resume:
+            resume_wandb_run_id = ckpt_dict.get("wandb_run_id", None)
 
     # -----------------------------------------------------------------------
     # 日志：TensorBoard / WandB，仅 rank 0；并写 config.json
@@ -599,6 +513,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
             config,
             log_tb=config.experiment.logging.log_tb,
             log_wandb=config.experiment.logging.log_wandb,
+            wandb_run_id=resume_wandb_run_id,
         )
         with open(os.path.join(log_dir, "..", "config.json"), "w") as f:
             json.dump(config, f, indent=4)
@@ -617,19 +532,15 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
     train_num_steps = config.experiment.epoch_every_n_steps
     valid_num_steps = config.experiment.validation_epoch_every_n_steps
     best_valid_loss = None
-    best_return = {k: -np.inf for k in envs} if config.experiment.rollout.enabled else None
-    best_success_rate = {k: -1.0 for k in envs} if config.experiment.rollout.enabled else None
+    best_return = None  # rollout 已移除；保留占位以兼容 save_model / resume
+    best_success_rate = None
     last_ckpt_time = time.time()
     data_loader_iter = None
     start_epoch = 1
 
-    ckpt_path = config.experiment.ckpt_path
-    resume = getattr(config.experiment, "resume", False)
-    if ckpt_path is not None:
+    if ckpt_dict is not None:
         if is_main:
             print("LOADING MODEL WEIGHTS FROM " + ckpt_path)
-        from robomimic.utils.file_utils import maybe_dict_from_checkpoint
-        ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
         # Load into unwrapped algo; DDP wrap happens below
         model.deserialize(ckpt_dict["model"])
         if resume and "epoch" in ckpt_dict and "optimizer" in ckpt_dict:
@@ -746,115 +657,6 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                         ckpt_reason = "valid" if ckpt_reason is None else ckpt_reason
 
         # -------------------------------------------------------------------
-        # Rollout：rank 0 在环境中跑 policy，录视频，可选按 return/success 保存
-        # -------------------------------------------------------------------
-        video_paths = None
-        rollout_check = (
-            config.experiment.rollout.enabled
-            and is_main
-            and (epoch > config.experiment.rollout.warmstart)
-            and ((epoch % config.experiment.rollout.rate == 0) or (should_save_ckpt and ckpt_reason == "time"))
-        )
-        if rollout_check and envs:
-            rollout_model = RolloutPolicy(
-                unwrapped,
-                obs_normalization_stats=obs_normalization_stats,
-                action_normalization_stats=action_normalization_stats,
-            )
-            num_episodes = config.experiment.rollout.n
-            rollout_cfg = config.experiment.rollout
-            robocasa_style = getattr(rollout_cfg, "robocasa_style", False)
-            lang_keys = list(getattr(config.observation.modalities.obs, "lang", None) or [])
-            parallel_workers = getattr(rollout_cfg, "parallel_workers", 1)
-            env_factory = None
-            if robocasa_style and parallel_workers > 1 and (not env_pools or len(env_pools) == 0):
-                def _make_env_factory():
-                    _cfg = config
-                    _rcfg = rollout_cfg
-                    _shape_meta = shape_meta
-                    def _factory(env_name):
-                        _img_res = _get_rollout_img_res(_cfg, _rcfg)
-                        env = RobocasaRolloutUtils.create_robocasa_env_for_rollout(
-                            env_name=env_name,
-                            robots=getattr(_rcfg, "robots", "PandaMobile"),
-                            img_res=_img_res,
-                            obj_instance_split=getattr(_rcfg, "obj_instance_split", "B"),
-                            layout_and_style_ids=getattr(
-                                _rcfg, "layout_and_style_ids", "((1,1),(2,2),(4,4),(6,9),(7,10))"
-                            ),
-                            seed=_cfg.train.seed,
-                            episode_idx=None,
-                            use_image_obs=_shape_meta["use_images"],
-                            postprocess_visual_obs=True,
-                        )
-                        return EnvUtils.wrap_env_from_config(env, config=_cfg)
-                    return _factory
-                env_factory = _make_env_factory()
-            if robocasa_style:
-                rollout_verbose = debug  # verbose rollout logs when debug
-                all_rollout_logs, video_paths = RobocasaRolloutUtils.rollout_with_stats_robocasa(
-                    policy=rollout_model,
-                    envs=envs,
-                    horizon_map=None,
-                    use_goals=config.use_goals,
-                    num_episodes=num_episodes,
-                    render=False,
-                    video_dir=video_dir if config.experiment.render_video else None,
-                    epoch=epoch,
-                    video_skip=config.experiment.get("video_skip", 5),
-                    terminate_on_success=rollout_cfg.terminate_on_success,
-                    num_wait_steps=getattr(rollout_cfg, "num_wait_steps", 10),
-                    default_horizon=rollout_cfg.horizon,
-                    lang_keys=lang_keys if lang_keys else None,
-                    parallel_workers=parallel_workers,
-                    env_factory=env_factory,
-                    env_pools=env_pools if env_pools else None,
-                    verbose=rollout_verbose,
-                )
-            else:
-                all_rollout_logs, video_paths = TrainUtils.rollout_with_stats(
-                    policy=rollout_model,
-                    envs=envs,
-                    horizon=rollout_cfg.horizon,
-                    use_goals=config.use_goals,
-                    num_episodes=num_episodes,
-                    render=False,
-                    video_dir=video_dir if config.experiment.render_video else None,
-                    epoch=epoch,
-                    video_skip=config.experiment.get("video_skip", 5),
-                    terminate_on_success=rollout_cfg.terminate_on_success,
-                )
-            if is_main:
-                for env_name in all_rollout_logs:
-                    rollout_logs = all_rollout_logs[env_name]
-                    for k, v in rollout_logs.items():
-                        if k.startswith("Time_"):
-                            data_logger.record("Timing_Stats/Rollout_{}_{}".format(env_name, k[5:]), v, epoch)
-                        else:
-                            data_logger.record("Rollout/{}/{}".format(k, env_name), v, epoch, log_stats=True)
-                    success_rate = rollout_logs.get("Success_Rate", 0)
-                    data_logger.record("Rollout_Success_Rate", success_rate, epoch)
-                    print("\nEpoch {} Rollouts (Success_Rate={:.1%}) took {}s (avg) with results:".format(
-                        epoch, success_rate, rollout_logs["time"]))
-                    print("Env: {}".format(env_name))
-                    print(json.dumps(rollout_logs, sort_keys=True, indent=4))
-                updated_stats = TrainUtils.should_save_from_rollout_logs(
-                    all_rollout_logs=all_rollout_logs,
-                    best_return=best_return,
-                    best_success_rate=best_success_rate,
-                    epoch_ckpt_name=epoch_ckpt_name,
-                    save_on_best_rollout_return=config.experiment.save.on_best_rollout_return,
-                    save_on_best_rollout_success_rate=config.experiment.save.on_best_rollout_success_rate,
-                )
-                best_return = updated_stats["best_return"]
-                best_success_rate = updated_stats["best_success_rate"]
-                epoch_ckpt_name = updated_stats["epoch_ckpt_name"]
-                if updated_stats["should_save_ckpt"]:
-                    should_save_ckpt = True
-                if updated_stats["ckpt_reason"] is not None:
-                    ckpt_reason = updated_stats["ckpt_reason"]
-
-        # -------------------------------------------------------------------
         # MSE：从 train_loader 取一批，算预测动作与真实动作误差（参考 train_droid）
         # RoboCasa 7D：pos(3) + euler(3) + gripper(1)
         # -------------------------------------------------------------------
@@ -947,18 +749,6 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                 unwrapped.set_train()
 
         # -------------------------------------------------------------------
-        # 非保留时删除本 epoch 的 rollout 视频以省磁盘
-        # -------------------------------------------------------------------
-        if is_main and video_paths and not (
-            (should_save_ckpt and ckpt_reason != "valid") or config.experiment.keep_all_videos
-        ):
-            for env_name in video_paths:
-                try:
-                    os.remove(video_paths[env_name])
-                except Exception:
-                    pass
-
-        # -------------------------------------------------------------------
         # 写 checkpoint（rank 0），含 optimizer/scheduler/epoch 供 resume
         # -------------------------------------------------------------------
         if should_save_ckpt and is_main:
@@ -975,6 +765,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                 best_valid_loss=best_valid_loss,
                 best_return=best_return,
                 best_success_rate=best_success_rate,
+                wandb_run_id=(data_logger.wandb_run_id if data_logger is not None else None),
             )
 
         # -------------------------------------------------------------------
@@ -986,24 +777,8 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
             print("\nEpoch {} Memory Usage: {} MB\n".format(epoch, mem_usage))
 
     # -----------------------------------------------------------------------
-    # 收尾：关闭 env 池、logger，DDP 在 main() 的 finally 里 cleanup
+    # 收尾：关闭 logger，DDP 在 main() 的 finally 里 cleanup
     # -----------------------------------------------------------------------
-    if is_main and env_pools is not None:
-        for env_name, pool in env_pools.items():
-            for i, e in enumerate(pool):
-                if hasattr(e, "close"):
-                    try:
-                        e.close()
-                    except Exception:
-                        pass
-        print(">> Closed pre-created env pools.")
-    elif is_main and envs:
-        for env_name, env in envs.items():
-            if hasattr(env, "close"):
-                try:
-                    env.close()
-                except Exception:
-                    pass
     if is_main and data_logger is not None:
         data_logger.close()
 

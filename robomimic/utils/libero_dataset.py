@@ -11,6 +11,8 @@ HDF5 layout:
     data/{demo}/obs/eye_in_hand_rgb[_jpeg]
     data/{demo}/obs/robot_states               (T, 9)   # preferred
     data/{demo}/robot_states                   (T, 9)   # some exports (e.g. libero_10) use demo root
+        robot_states 列序经逐列核对为 [gripper_qpos(2), eef_pos(3), eef_quat(4)]（与 RoboCasa 同序）：
+        [:,0:2]==gripper_states, [:,2:5]==ee_pos, [:,5:9]==robot0_eef_quat(单位四元数)。
     data/{demo}/actions                        (T, 7)
 
     Many LIBERO exports (e.g. libero_10) also store under data/{demo}/obs/:
@@ -184,12 +186,13 @@ class LIBERODataset(torch.utils.data.Dataset):
                             obs_dict[obs_key] = imgs.astype(np.uint8)
                         elif obs_key == "robot_states":
                             obs_dict[obs_key] = _get_robot_states().astype(np.float32)
-                        elif obs_key == "robot0_eef_pos":
-                            obs_dict[obs_key] = _get_robot_states()[:, :3].astype(np.float32)
-                        elif obs_key == "robot0_eef_quat":
-                            obs_dict[obs_key] = _get_robot_states()[:, 3:7].astype(np.float32)
+                        # robot_states 列序: [gripper_qpos(2), eef_pos(3), eef_quat(4)]（经逐列核对）
                         elif obs_key == "robot0_gripper_qpos":
-                            obs_dict[obs_key] = _get_robot_states()[:, 7:9].astype(np.float32)
+                            obs_dict[obs_key] = _get_robot_states()[:, 0:2].astype(np.float32)
+                        elif obs_key == "robot0_eef_pos":
+                            obs_dict[obs_key] = _get_robot_states()[:, 2:5].astype(np.float32)
+                        elif obs_key == "robot0_eef_quat":
+                            obs_dict[obs_key] = _get_robot_states()[:, 5:9].astype(np.float32)
                         else:
                             if obs_key in obs_group:
                                 obs_dict[obs_key] = obs_group[obs_key][:].astype(np.float32)

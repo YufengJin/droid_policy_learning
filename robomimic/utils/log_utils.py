@@ -66,9 +66,11 @@ class DataLogger:
         log_wandb: bool = False,
         wandb_init_retries: int = 10,
         wandb_init_backoff_seconds: float = 30.0,
+        wandb_run_id: str = None,
     ):
         self._tb_logger = None
         self._wandb_logger = None
+        self._wandb_run_id = None
         self._data: dict[str, list[float]] = {}
 
         if log_tb:
@@ -81,11 +83,12 @@ class DataLogger:
                 config=config,
                 retries=wandb_init_retries,
                 backoff=wandb_init_backoff_seconds,
+                wandb_run_id=wandb_run_id,
             )
 
     # ---------- wandb init ----------
 
-    def _init_wandb(self, log_dir: str, config: Any, retries: int, backoff: float) -> None:
+    def _init_wandb(self, log_dir: str, config: Any, retries: int, backoff: float, wandb_run_id: str = None) -> None:
         import wandb
         import robomimic.macros as Macros
 
@@ -100,16 +103,32 @@ class DataLogger:
             )
         )
 
+        # 若用户显式设置 WANDB_MODE（offline/disabled/online），则尊重之并跳过 online 重试，
+        # 避免无 key/无网时白白 backoff 重试 retries 次。未设置时维持原 online→offline 兜底逻辑。
+        forced_mode = os.environ.get("WANDB_MODE", "").strip().lower() or None
+
         for attempt in range(retries):
             try:
                 self._wandb_logger = wandb
-                self._wandb_logger.init(
+                # resume: when wandb_run_id is provided (e.g. continuing a checkpoint),
+                # reattach to the same run so logging appends to the original curves.
+                init_kwargs = dict(
                     entity=Macros.WANDB_ENTITY,
                     project=config.experiment.logging.wandb_proj_name,
                     name=config.experiment.name,
                     dir=log_dir,
-                    mode=("offline" if attempt == retries - 1 else "online"),
+                    mode=(forced_mode if forced_mode is not None
+                          else ("offline" if attempt == retries - 1 else "online")),
                 )
+                if wandb_run_id is not None:
+                    init_kwargs["id"] = wandb_run_id
+                    init_kwargs["resume"] = "allow"
+                self._wandb_logger.init(**init_kwargs)
+                # remember the active run id so it can be persisted into checkpoints
+                try:
+                    self._wandb_run_id = self._wandb_logger.run.id
+                except Exception:
+                    self._wandb_run_id = wandb_run_id
                 self._sync_wandb_config(config)
                 break
             except Exception as e:
@@ -135,6 +154,12 @@ class DataLogger:
         if "algo" not in wandb_config:
             wandb_config["algo"] = config.algo_name
         self._wandb_logger.config.update(wandb_config)
+
+    @property
+    def wandb_run_id(self):
+        """Active wandb run id (None if wandb logging is disabled/failed). Persist into
+        checkpoints so a later resume can reattach to the same run."""
+        return self._wandb_run_id
 
     # ---------- record API ----------
 

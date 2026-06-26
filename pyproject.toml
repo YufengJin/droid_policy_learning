@@ -55,7 +55,7 @@ dependencies = [
     "tqdm",
     "transformers==4.34.0",
     "wandb",
-    "policy-websocket @ git+https://github.com/YufengJin/policy_websocket.git",
+    "policy-websocket @ git+https://github.com/YufengJin/policy_websocket.git@main",
 ]
 
 [project.optional-dependencies]

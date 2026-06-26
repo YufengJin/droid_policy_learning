@@ -61,10 +61,9 @@ import robomimic.utils.eval_utils as EvalUtils
 import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
-import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.file_utils as FileUtils
 from robomimic.config import config_factory
-from robomimic.algo import algo_factory, RolloutPolicy
+from robomimic.algo import algo_factory
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
 from robomimic.utils.libero_dataset import LIBERODataset
 from robomimic.utils.action_space_utils import ACTION_SPACE_DIMS, get_rot_slice, get_rot_format_for_eval
@@ -368,24 +367,24 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
         )
 
     # -----------------------------------------------------------------------
-    # Environment & Logger
+    # Logger
+    # 评测改为 client/server（见 robomimic.scripts.policy_server + benchmarks/*/run_eval.py），
+    # 训练循环不再建仿真环境、不做 in-process rollout。
     # -----------------------------------------------------------------------
-    if config.experiment.env is not None:
-        env_meta["env_name"] = config.experiment.env
-
-    envs = OrderedDict()
-    if config.experiment.rollout.enabled and is_main:
-        env_names = [env_meta["env_name"]]
-        if config.experiment.additional_envs is not None:
-            env_names.extend(config.experiment.additional_envs)
-        for env_name in env_names:
-            env = EnvUtils.create_env_from_metadata(env_meta=env_meta, env_name=env_name, render=False, render_offscreen=config.experiment.render_video, use_image_obs=shape_meta["use_images"])
-            env = EnvUtils.wrap_env_from_config(env, config=config)
-            envs[env.name] = env
+    # ckpt 预加载（仅一次）：resume 时先取出 wandb_run_id，供 DataLogger 续接同一 run
+    ckpt_path = config.experiment.ckpt_path
+    resume = getattr(config.experiment, "resume", False)
+    ckpt_dict = None
+    resume_wandb_run_id = None
+    if ckpt_path is not None:
+        from robomimic.utils.file_utils import maybe_dict_from_checkpoint
+        ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
+        if resume:
+            resume_wandb_run_id = ckpt_dict.get("wandb_run_id", None)
 
     data_logger = None
     if is_main:
-        data_logger = DataLogger(log_dir, config, log_tb=config.experiment.logging.log_tb, log_wandb=config.experiment.logging.log_wandb)
+        data_logger = DataLogger(log_dir, config, log_tb=config.experiment.logging.log_tb, log_wandb=config.experiment.logging.log_wandb, wandb_run_id=resume_wandb_run_id)
         with open(os.path.join(log_dir, "..", "config.json"), "w") as f:
             json.dump(config, f, indent=4)
 
@@ -394,13 +393,23 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
     # -----------------------------------------------------------------------
     model = algo_factory(algo_name=config.algo_name, config=config, obs_key_shapes=shape_meta["all_shapes"], ac_dim=shape_meta["ac_dim"], device=device)
 
-    ckpt_path = config.experiment.ckpt_path
-    if ckpt_path is not None:
+    start_epoch = 1
+    best_valid_loss = None
+    if ckpt_dict is not None:
         if is_main:
             print("LOADING MODEL WEIGHTS FROM " + ckpt_path)
-        from robomimic.utils.file_utils import maybe_dict_from_checkpoint
-        ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
         model.deserialize(ckpt_dict["model"])
+        # 完整 resume：恢复 optimizer/scheduler/epoch（需 ckpt 由本流程保存，含这些字段）
+        if resume and "epoch" in ckpt_dict and "optimizer" in ckpt_dict:
+            if is_main:
+                print("RESUMING: loading optimizer, scheduler, epoch from checkpoint")
+            TrainUtils._load_optimizer_state(model.optimizers, ckpt_dict["optimizer"])
+            TrainUtils._load_scheduler_state(model.lr_schedulers, ckpt_dict["lr_scheduler"])
+            start_epoch = ckpt_dict["epoch"] + 1
+            if "best_valid_loss" in ckpt_dict:
+                best_valid_loss = ckpt_dict["best_valid_loss"]
+            if is_main:
+                print("RESUME: starting from epoch {}".format(start_epoch))
 
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
@@ -417,13 +426,10 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
     # -----------------------------------------------------------------------
     train_num_steps = config.experiment.epoch_every_n_steps
     valid_num_steps = config.experiment.validation_epoch_every_n_steps
-    best_valid_loss = None
-    best_return = {k: -np.inf for k in envs} if config.experiment.rollout.enabled else None
-    best_success_rate = {k: -1.0 for k in envs} if config.experiment.rollout.enabled else None
     last_ckpt_time = time.time()
     data_loader_iter = None
 
-    for epoch in range(1, config.train.num_epochs + 1):
+    for epoch in range(start_epoch, config.train.num_epochs + 1):
         if use_ddp and hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
 
@@ -470,33 +476,6 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
                         epoch_ckpt_name += "_best_validation_{}".format(best_valid_loss)
                         should_save_ckpt = True
                         ckpt_reason = "valid" if ckpt_reason is None else ckpt_reason
-
-        video_paths = None
-        rollout_check = config.experiment.rollout.enabled and is_main and (epoch > config.experiment.rollout.warmstart) and ((epoch % config.experiment.rollout.rate == 0) or (should_save_ckpt and ckpt_reason == "time"))
-        if rollout_check and envs:
-            rollout_model = RolloutPolicy(unwrapped, obs_normalization_stats=obs_normalization_stats, action_normalization_stats=action_normalization_stats)
-            all_rollout_logs, video_paths = TrainUtils.rollout_with_stats(
-                policy=rollout_model, envs=envs, horizon=config.experiment.rollout.horizon, use_goals=config.use_goals,
-                num_episodes=config.experiment.rollout.n, render=False,
-                video_dir=video_dir if config.experiment.render_video else None, epoch=epoch,
-                video_skip=config.experiment.get("video_skip", 5), terminate_on_success=config.experiment.rollout.terminate_on_success,
-            )
-            if is_main:
-                for env_name in all_rollout_logs:
-                    rollout_logs = all_rollout_logs[env_name]
-                    for k, v in rollout_logs.items():
-                        if k.startswith("Time_"):
-                            data_logger.record("Timing_Stats/Rollout_{}_{}".format(env_name, k[5:]), v, epoch)
-                        else:
-                            data_logger.record("Rollout/{}/{}".format(k, env_name), v, epoch, log_stats=True)
-                updated_stats = TrainUtils.should_save_from_rollout_logs(all_rollout_logs=all_rollout_logs, best_return=best_return, best_success_rate=best_success_rate, epoch_ckpt_name=epoch_ckpt_name, save_on_best_rollout_return=config.experiment.save.on_best_rollout_return, save_on_best_rollout_success_rate=config.experiment.save.on_best_rollout_success_rate)
-                best_return = updated_stats["best_return"]
-                best_success_rate = updated_stats["best_success_rate"]
-                epoch_ckpt_name = updated_stats["epoch_ckpt_name"]
-                if updated_stats["should_save_ckpt"]:
-                    should_save_ckpt = True
-                if updated_stats["ckpt_reason"] is not None:
-                    ckpt_reason = updated_stats["ckpt_reason"]
 
         # MSE evaluation
         if config.experiment.mse.enabled and is_main:
@@ -550,15 +529,8 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
                     print(json.dumps(mse_log, sort_keys=True, indent=4))
                 unwrapped.set_train()
 
-        if is_main and video_paths and not ((should_save_ckpt and ckpt_reason != "valid") or config.experiment.keep_all_videos):
-            for env_name in video_paths:
-                try:
-                    os.remove(video_paths[env_name])
-                except Exception:
-                    pass
-
         if should_save_ckpt and is_main:
-            TrainUtils.save_model(model=unwrapped, config=config, env_meta=env_meta, shape_meta=shape_meta, ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"), obs_normalization_stats=obs_normalization_stats, action_normalization_stats=action_normalization_stats)
+            TrainUtils.save_model(model=unwrapped, config=config, env_meta=env_meta, shape_meta=shape_meta, ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"), obs_normalization_stats=obs_normalization_stats, action_normalization_stats=action_normalization_stats, epoch=epoch, best_valid_loss=best_valid_loss, wandb_run_id=(data_logger.wandb_run_id if data_logger is not None else None))
 
         if is_main:
             mem_usage = int(psutil.Process().memory_info().rss / 1000000)

@@ -1,44 +1,40 @@
 #!/usr/bin/env python3
 """
-run_policy_server.py — Trained-policy WebSocket server.
+policy_server.py — Diffusion-Policy WebSocket server (LIBERO + RoboCasa, benchmark 自动识别).
 
-Loads a robomimic checkpoint (supporting DDP-saved checkpoints), converts to
-eval mode with optional bfloat16 precision, and serves actions over WebSocket
-via policy_websocket.
+给一个 robomimic diffusion policy 的 ckpt 即可起服务；按 run_eval 客户端发来的
+``obs["__meta__"]["benchmark"]`` 主动识别 benchmark（libero / robocasa），把**原始 robosuite obs**
+转换成 ``TrainedPolicyAdapter`` 需要的 prepared obs（primary/secondary/wrist + proprio + task_description），
+再交给已训练模型推理。设计参考 openvla-oft 的 vla-scripts/policy_server.py（envelope-first dispatch）。
 
-Internally handles:
-  * Action chunking — Diffusion Policy predicts an action_horizon-length chunk;
-    the model caches the chunk and pops one action per infer call.
-  * Frame stacking — maintains a temporal buffer of the last ``frame_stack``
-    observations so the model receives the correct observation horizon.
-  * Language conditioning — encodes the task description into a DistilBERT
-    768-d embedding and attaches it to every observation.
+本文件自包含：模型加载/推理核心 ``TrainedPolicyAdapter``（原 run_policy_server.py，已合并进来）
++ raw→prepared 适配 + benchmark 分发 ``BenchmarkDispatchPolicy``。
 
-Client obs format (RoboCasa-compatible):
-  primary_image, secondary_image, wrist_image (H,W,3 uint8),
-  proprio (9-d: gripper(2)+eef_pos(3)+eef_quat(4)),
-  task_description (str)
+obs 约定（对应训练 config）：
+  * LIBERO 模型：2 路相机(agentview/eye_in_hand) + robot_states(9D=[gripper_qpos(2),eef_pos(3),eef_quat(4)])，无语言。
+  * RoboCasa 模型：3 路相机(agentview_left/right/eye_in_hand) + DistilBERT 语言，无 low_dim（proprio 不使用）。
 
-Usage:
-    python -m robomimic.scripts.run_policy_server --ckpt /path/to/model.pth --port 8000
+动作：diffusion policy 训练于同仿真 HDF5，输出已是 env 动作空间（7D，gripper 已是 -1/+1），
+不做 openvla 式 gripper normalize/invert；run_eval 端 ``pad_action_for_env`` 负责 7→env_dim 填充。
 
-    python -m robomimic.scripts.run_policy_server \\
-        --ckpt /path/to/model.pth --port 8000 --device cuda:1 --bf16
+用法：
+    python -m robomimic.scripts.policy_server --ckpt /path/to/model.pth --port 8000
+客户端（run_eval，--arm_controller cartesian_pose，7D）：
+    # robocasa env: python scripts/run_eval.py --task_name PnPCounterToCab --policy_server_addr localhost:8000
+    # libero env:   python scripts/run_eval.py --task_suite_name libero_spatial --policy_server_addr localhost:8000
 """
 
 import argparse
 import logging
-import os
 import sys
 from collections import deque
-from typing import Dict
+from typing import Any, Dict
 
 import cv2
 import numpy as np
 import torch
 
 from policy_websocket import BasePolicy, WebsocketPolicyServer
-
 
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.torch_utils as TorchUtils
@@ -48,6 +44,13 @@ import robomimic.utils.action_utils as AcUtils
 from robomimic.algo import algo_factory
 
 logger = logging.getLogger(__name__)
+
+
+# ===========================================================================
+# TrainedPolicyAdapter —— 载 robomimic ckpt + 推理（含 action chunking / frame
+# stacking / 语言编码 / 动作反归一化）。客户端发 prepared obs（primary_image /
+# secondary_image / wrist_image / proprio / task_description）。
+# ===========================================================================
 
 _ROBOCASA_PROPRIO_SLICES = {
     "robot0_gripper_qpos": (0, 2),
@@ -163,8 +166,11 @@ class TrainedPolicyAdapter(BasePolicy):
         self.rgb_keys = set()
         self.low_dim_keys = set()
         self.lang_keys = set()
+        # locked robomimic Config 上 getattr(默认值) 会抛 RuntimeError（缺失键时），
+        # 用 `in` 成员判断安全取值（如 LIBERO 配置无 lang/depth/scan 模态）。
+        obs_mod = config.observation.modalities.obs
         for modality in ("low_dim", "rgb", "depth", "scan", "lang"):
-            keys = getattr(config.observation.modalities.obs, modality, None) or []
+            keys = (obs_mod[modality] or []) if modality in obs_mod else []
             if modality == "rgb":
                 self.rgb_keys.update(keys)
             elif modality == "low_dim":
@@ -244,7 +250,9 @@ class TrainedPolicyAdapter(BasePolicy):
                     out[k] = proprio[lo:hi].astype(np.float32)
                 elif k in self.low_dim_shapes:
                     dim = int(np.prod(self.low_dim_shapes[k]))
-                    out[k] = np.zeros(dim, dtype=np.float32)
+                    # 单一 low_dim 键且维度与 proprio 等长（如 LIBERO 的 robot_states=9D）→ 直接用整段 proprio；
+                    # 否则该 low_dim 不在 proprio 内，置零占位。
+                    out[k] = proprio.astype(np.float32).copy() if dim == len(proprio) else np.zeros(dim, dtype=np.float32)
                 else:
                     out[k] = proprio.copy()
 
@@ -319,57 +327,156 @@ class TrainedPolicyAdapter(BasePolicy):
         self.step_count = 0
 
 
-class ResetOnInitPolicy(BasePolicy):
-    """Reset inner policy when receiving episode-init obs (action_dim, no images)."""
+# ===========================================================================
+# raw robosuite obs  ->  TrainedPolicyAdapter 的 prepared obs
+# ===========================================================================
 
-    def __init__(self, policy: BasePolicy):
-        self._policy = policy
+RAW_LIBERO_KEYS = ("agentview_image", "robot0_eye_in_hand_image")
+RAW_ROBOCASA_KEYS = ("robot0_agentview_left_image", "robot0_eye_in_hand_image")
 
-    def infer(self, obs: Dict) -> Dict:
-        if "action_dim" in obs and "primary_image" not in obs:
-            self._policy.reset()
-        if obs.get("reset") is True:
-            self._policy.reset()
-        return self._policy.infer(obs)
+
+def _validate(obs: Dict[str, Any], required: tuple, name: str) -> None:
+    missing = [k for k in required if obs.get(k) is None]
+    if missing:
+        raise ValueError(
+            "obs 格式 '{}' 缺少必需键 {}；收到键(前20): {}".format(
+                name, missing, list(obs.keys())[:20]
+            )
+        )
+
+
+def _proprio_libero(raw: Dict[str, Any]) -> np.ndarray:
+    """LIBERO robot_states 顺序：[gripper_qpos(2), eef_pos(3), eef_quat(4)] = 9D（与 RoboCasa 同序）。
+    经逐列核对训练 HDF5：robot_states[:,0:2]==gripper_states、[:,2:5]==ee_pos、[:,5:9] 为单位四元数
+    (== robosuite robot0_eef_quat)。训练把整段 robot_states 作单一 low_dim 键喂模型，故 eval 必须同序拼接。"""
+    if raw.get("robot0_eef_pos") is None:
+        return np.zeros(9, dtype=np.float32)
+    return np.concatenate([
+        np.asarray(raw["robot0_gripper_qpos"], dtype=np.float32).ravel(),  # 2
+        np.asarray(raw["robot0_eef_pos"], dtype=np.float32).ravel(),       # 3
+        np.asarray(raw["robot0_eef_quat"], dtype=np.float32).ravel(),      # 4
+    ]).astype(np.float32)
+
+
+def _proprio_robocasa(raw: Dict[str, Any]) -> np.ndarray:
+    """RoboCasa proprio 顺序：[gripper_qpos(2), eef_pos(3), eef_quat(4)] = 9D（见 _ROBOCASA_PROPRIO_SLICES）。"""
+    if raw.get("robot0_eef_pos") is None:
+        return np.zeros(9, dtype=np.float32)
+    return np.concatenate([
+        np.asarray(raw["robot0_gripper_qpos"], dtype=np.float32).ravel(),  # 2
+        np.asarray(raw["robot0_eef_pos"], dtype=np.float32).ravel(),       # 3
+        np.asarray(raw["robot0_eef_quat"], dtype=np.float32).ravel(),      # 4
+    ]).astype(np.float32)
+
+
+def prepare_obs_from_libero(raw: Dict[str, Any]) -> Dict[str, Any]:
+    _validate(raw, RAW_LIBERO_KEYS, "libero")
+    return {
+        "primary_image": np.asarray(raw["agentview_image"]),
+        "wrist_image": np.asarray(raw["robot0_eye_in_hand_image"]),
+        "proprio": _proprio_libero(raw),
+        "task_description": raw.get("task_description", ""),
+    }
+
+
+def prepare_obs_from_robocasa(raw: Dict[str, Any]) -> Dict[str, Any]:
+    _validate(raw, RAW_ROBOCASA_KEYS, "robocasa")
+    out = {
+        "primary_image": np.asarray(raw["robot0_agentview_left_image"]),
+        "wrist_image": np.asarray(raw["robot0_eye_in_hand_image"]),
+        "proprio": _proprio_robocasa(raw),
+        "task_description": raw.get("task_description", ""),
+    }
+    if raw.get("robot0_agentview_right_image") is not None:
+        out["secondary_image"] = np.asarray(raw["robot0_agentview_right_image"])
+    return out
+
+
+OBS_ADAPTERS = {
+    "libero": prepare_obs_from_libero,
+    "robocasa": prepare_obs_from_robocasa,
+}
+
+
+def _sniff_benchmark(obs: Dict[str, Any]) -> str:
+    """旧客户端无 __meta__ 信封时，按图像键回退识别。"""
+    if obs.get("agentview_image") is not None:
+        return "libero"
+    if obs.get("robot0_agentview_left_image") is not None:
+        return "robocasa"
+    raise ValueError(
+        "无法识别 benchmark：缺少 __meta__ 信封且无已知图像键。"
+        "期望 obs['__meta__']['benchmark'] in {} 或键 agentview_image / "
+        "robot0_agentview_left_image。收到键(前25): {}".format(
+            sorted(OBS_ADAPTERS), list(obs.keys())[:25]
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# 分发策略：raw obs + __meta__  ->  prepared obs  ->  TrainedPolicyAdapter
+# ---------------------------------------------------------------------------
+
+class BenchmarkDispatchPolicy(BasePolicy):
+    """读 __meta__ 选 benchmark adapter，把 raw obs 转 prepared 再交给 TrainedPolicyAdapter。"""
+
+    def __init__(self, inner: TrainedPolicyAdapter):
+        self._inner = inner
+
+    def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:
+        meta = obs.pop("__meta__", {}) if isinstance(obs, dict) else {}
+
+        # init / handshake：reset 并回零动作（modern: meta.phase=="init"；legacy: 有 action_dim 且无图像）
+        phase = meta.get("phase")
+        has_images = any(
+            obs.get(k) is not None
+            for k in ("agentview_image", "robot0_agentview_left_image",
+                      "primary_image", "robot0_eye_in_hand_image")
+        )
+        if phase == "init" or (phase is None and "action_dim" in obs and not has_images):
+            self._inner.reset()
+            return {"actions": np.zeros(int(obs.get("action_dim", 7)), dtype=np.float64)}
+
+        benchmark = meta.get("benchmark", "") or _sniff_benchmark(obs)
+        adapter = OBS_ADAPTERS.get(benchmark)
+        if adapter is None:
+            raise ValueError("未知 benchmark {!r}；已注册: {}".format(benchmark, sorted(OBS_ADAPTERS)))
+        prepared = adapter(obs)
+        if meta.get("task_description"):
+            prepared["task_description"] = meta["task_description"]
+        return self._inner.infer(prepared)
 
     def reset(self) -> None:
-        self._policy.reset()
+        self._inner.reset()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Trained-policy WebSocket server (robomimic checkpoint)",
+        description="Diffusion-policy WebSocket server (LIBERO+RoboCasa, benchmark 自动识别)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--ckpt", type=str, required=True, help="Path to .pth checkpoint")
-    parser.add_argument("--port", type=int, default=8000, help="WebSocket listen port")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Bind host")
-    parser.add_argument("--device", type=str, default=None, help="Torch device, e.g. cuda:0")
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16 to save GPU memory")
+    parser.add_argument("--ckpt", type=str, required=True, help="robomimic diffusion policy .pth")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--device", type=str, default=None, help="如 cuda:0")
+    parser.add_argument("--bf16", action="store_true", help="bfloat16 省显存")
     parser.add_argument("--image_size", type=int, nargs=2, default=None, metavar=("H", "W"))
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    device = torch.device(
-        args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-    )
+    device = torch.device(args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
     inner = TrainedPolicyAdapter(
         ckpt_path=args.ckpt,
         device=device,
         use_bf16=args.bf16,
         image_size=tuple(args.image_size) if args.image_size else None,
     )
-    policy = ResetOnInitPolicy(inner)
-    metadata = {"policy_name": "TrainedPolicy", "action_dim": 7}
+    policy = BenchmarkDispatchPolicy(inner)
+    metadata = {"policy_name": "DiffusionPolicy", "action_dim": 7}
 
-    server = WebsocketPolicyServer(
-        policy=policy,
-        host=args.host,
-        port=args.port,
-        metadata=metadata,
-    )
-    print(f"Trained-policy server on ws://{args.host}:{args.port}")
+    server = WebsocketPolicyServer(policy=policy, host=args.host, port=args.port, metadata=metadata)
+    print("Diffusion policy server on ws://{}:{} (benchmark auto-detect)".format(args.host, args.port))
     print("Press Ctrl+C to stop.\n")
     try:
         server.serve_forever()
@@ -377,7 +484,7 @@ def main():
         pass
     except OSError as e:
         if e.errno == 98:
-            print(f"\nERROR: Port {args.port} in use. Try: lsof -ti :{args.port} | xargs kill -9")
+            print("\nERROR: 端口 {} 被占用。试: lsof -ti :{} | xargs kill -9".format(args.port, args.port))
             sys.exit(1)
         raise
     print("Server stopped.")

@@ -1398,7 +1398,7 @@ wheels = [
 [[package]]
 name = "policy-websocket"
 version = "0.1.0"
-source = { git = "https://github.com/YufengJin/policy_websocket.git#37383ebddbbef5576de8d544f41a5ac9941ee178" }
+source = { git = "https://github.com/YufengJin/policy_websocket.git?rev=main#22f6a1b714b222962341fb802a7cdcb09175f657" }
 dependencies = [
     { name = "msgpack" },
     { name = "numpy" },
@@ -1883,7 +1883,7 @@ requires-dist = [
     { name = "optax", specifier = "==0.1.5" },
     { name = "pillow", marker = "extra == 'robocasa'" },
     { name = "plotly" },
-    { name = "policy-websocket", git = "https://github.com/YufengJin/policy_websocket.git" },
+    { name = "policy-websocket", git = "https://github.com/YufengJin/policy_websocket.git?rev=main" },
     { name = "pre-commit", specifier = "==3.3.3" },
     { name = "protobuf", specifier = ">=3.20.3,<4.25" },
     { name = "psutil" },
@@ -2354,8 +2354,8 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/cu118/torch-2.0.1%2Bcu118-cp310-cp310-linux_x86_64.whl", hash = "sha256:a7a49d459bf4862f64f7bc1a68beccf8881c2fa9f3e0569608e16ba6f85ebf7b" },
-    { url = "https://download.pytorch.org/whl/cu118/torch-2.0.1%2Bcu118-cp310-cp310-win_amd64.whl", hash = "sha256:f58d75619bc96e4322343c030b893613701caa2d6db8017155da226c14171335" },
+    { url = "https://download-r2.pytorch.org/whl/cu118/torch-2.0.1%2Bcu118-cp310-cp310-linux_x86_64.whl", hash = "sha256:a7a49d459bf4862f64f7bc1a68beccf8881c2fa9f3e0569608e16ba6f85ebf7b", upload-time = "2023-10-06T20:56:06Z" },
+    { url = "https://download-r2.pytorch.org/whl/cu118/torch-2.0.1%2Bcu118-cp310-cp310-win_amd64.whl", hash = "sha256:f58d75619bc96e4322343c030b893613701caa2d6db8017155da226c14171335", upload-time = "2023-10-06T20:57:23Z" },
 ]
 
 [[package]]
@@ -2369,8 +2369,8 @@ dependencies = [
     { name = "torch" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu118/torchvision-0.15.2%2Bcu118-cp310-cp310-linux_x86_64.whl", hash = "sha256:19ca4ab5d6179bbe53cff79df1a855ee6533c2861ddc7389f68349d8b9f8302a" },
-    { url = "https://download-r2.pytorch.org/whl/cu118/torchvision-0.15.2%2Bcu118-cp310-cp310-win_amd64.whl", hash = "sha256:bfd2435d681418bea8dacde2b2cb6e5dd40a0e0243d3631e2b71c10bf9831f39" },
+    { url = "https://download-r2.pytorch.org/whl/cu118/torchvision-0.15.2%2Bcu118-cp310-cp310-linux_x86_64.whl", hash = "sha256:19ca4ab5d6179bbe53cff79df1a855ee6533c2861ddc7389f68349d8b9f8302a", upload-time = "2023-10-06T21:35:27Z" },
+    { url = "https://download-r2.pytorch.org/whl/cu118/torchvision-0.15.2%2Bcu118-cp310-cp310-win_amd64.whl", hash = "sha256:bfd2435d681418bea8dacde2b2cb6e5dd40a0e0243d3631e2b71c10bf9831f39", upload-time = "2023-10-06T21:35:28Z" },
 ]
 
 [[package]]
@@ -2423,10 +2423,10 @@ name = "triton"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cmake" },
-    { name = "filelock" },
-    { name = "lit" },
-    { name = "torch" },
+    { name = "cmake", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')" },
+    { name = "filelock", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')" },
+    { name = "lit", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')" },
+    { name = "torch", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ca/31/ff6be541195daf77aa5c72303b2354661a69e717967d44d91eb4f3fdce32/triton-2.0.0-1-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:38806ee9663f4b0f7cd64790e96c579374089e58f49aac4a6608121aa55e2505", size = 63268585, upload-time = "2023-03-20T17:32:17.169Z" },

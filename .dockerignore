@@ -1,0 +1,13 @@
+# 烤入 robomimic 源码（~5MB）即可。排除大块/会重生成/运行时 bind 的内容：
+#  - outputs/   训练 ckpt（7GB+），运行时 bind 到容器，不进镜像
+#  - benchmarks/ 嵌套的 robocasa（8GB 含素材），仅 INCLUDE_ROBOCASA=1 用；解耦架构里 robocasa 单独成 sif
+#  - .git / 日志 / egg-info / pyc 等
+outputs
+benchmarks
+.git
+eval_logs
+wandb
+logs
+*.egg-info
+**/__pycache__
+**/*.pyc

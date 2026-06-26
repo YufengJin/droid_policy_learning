@@ -60,7 +60,7 @@ WANDB_ENV_FILE="${PROJECT_ROOT}/slurm/.env.wandb"
 [[ -f "$WANDB_ENV_FILE" ]] && source "$WANDB_ENV_FILE"
 [[ -n "${WANDB_API_KEY:-}" ]] && export APPTAINERENV_WANDB_API_KEY="$WANDB_API_KEY"
 
-CONTAINER_IMAGE="${APPTAINER_IMAGE:-$PROJECT_ROOT/droid_policy.sif}"
+CONTAINER_IMAGE="${APPTAINER_IMAGE:-${WORK:-$PROJECT_ROOT}/sif/droid.sif}"
 HOST_CODE_DIR="${DROID_PROJECT_DIR:-$PROJECT_ROOT}"
 HOST_FAKE_ROOT="${APPTAINER_FAKE_ROOT:-${WORK:-$HOME}/.apptainer_fake_root}"
 HOST_TMPDIR="${TMPDIR:-/tmp}"
@@ -72,7 +72,7 @@ CONT_HF="/root/.cache/huggingface"
 
 if [[ ! -f "$CONTAINER_IMAGE" ]]; then
   echo "[ERR] Container image not found: $CONTAINER_IMAGE"
-  echo "请先构建: apptainer build droid_policy.sif apptainer/droid_policy.def"
+  echo "请先构建 droid.sif（docker→sif，见 docs/quick_start_apptainer.md；或设 APPTAINER_IMAGE 指向已有镜像/.def 产物）"
   exit 1
 fi
 

@@ -603,7 +603,7 @@ def _load_scheduler_state(lr_schedulers, state_dict):
 
 
 def save_model(model, config, env_meta, shape_meta, ckpt_path, obs_normalization_stats=None, action_normalization_stats=None,
-              epoch=None, best_valid_loss=None, best_return=None, best_success_rate=None):
+              epoch=None, best_valid_loss=None, best_return=None, best_success_rate=None, wandb_run_id=None):
     """
     Save model to a torch pth file. Optionally include training state for full resume.
 
@@ -629,6 +629,8 @@ def save_model(model, config, env_meta, shape_meta, ckpt_path, obs_normalization
         best_valid_loss (float): best validation loss so far
         best_return (dict): best rollout return per env
         best_success_rate (dict): best rollout success rate per env
+
+        wandb_run_id (str): active wandb run id to persist for resume (reattach same run)
     """
     env_meta = deepcopy(env_meta)
     shape_meta = deepcopy(shape_meta)
@@ -657,6 +659,10 @@ def save_model(model, config, env_meta, shape_meta, ckpt_path, obs_normalization
             params["best_return"] = best_return
         if best_success_rate is not None:
             params["best_success_rate"] = best_success_rate
+
+    # wandb run id for resume: persist so a later resume can reattach to the same run
+    if wandb_run_id is not None:
+        params["wandb_run_id"] = wandb_run_id
 
     torch.save(params, ckpt_path)
     print("save checkpoint to {}".format(ckpt_path))

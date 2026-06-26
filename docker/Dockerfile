@@ -82,7 +82,16 @@ ENV INCLUDE_ROBOCASA=${INCLUDE_ROBOCASA}
 RUN uv pip install -e /opt/third_party/octo
 
 # -----------------------------------------------------------------------------
-# 7. Workspace (project mounted at runtime; entrypoint does pip install -e .)
+# 7. Bake robomimic source into the image (self-contained)
+# -----------------------------------------------------------------------------
+# 把 robomimic 源码 COPY 进镜像并就地 editable 安装，使集群上 .sif 完全自包含、运行时不需联网/不需 bind 源码。
+# outputs/(ckpt) 与 benchmarks/(嵌套 robocasa) 经 .dockerignore 排除（运行时 bind ckpt；robocasa 单独成 sif）。
+# 要 live 编辑时仍可运行时 -B host源码:/workspace/droid_policy_learning 覆盖（editable 路径一致）。
+COPY . /workspace/droid_policy_learning
+RUN cd /workspace/droid_policy_learning && uv pip install -e .
+
+# -----------------------------------------------------------------------------
+# 8. Workspace + entrypoint
 # -----------------------------------------------------------------------------
 WORKDIR /workspace/droid_policy_learning
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

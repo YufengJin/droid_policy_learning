@@ -41,3 +41,5 @@ logs/
 *.sif
 
 .claude/
+
+eval_logs/
