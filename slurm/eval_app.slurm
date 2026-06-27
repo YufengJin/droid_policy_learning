@@ -50,12 +50,12 @@ for f in "$DROID_SIF" "$BENCH_SIF"; do
 done
 
 # benchmark 数据集（libero 评测可能用到演示数据；robocasa 素材已烤入镜像，无需挂）
-LIBERO_DATA="${LIBERO_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/libero}"
+LIBERO_DATA="${LIBERO_DATASET_DIR:-/home/hpc/g108ea/g108ea10/atuin/datasets/libero}"
 
 # ---- 4) apptainer / 缓存 / fakeroot / HF / wandb（全部指向 $WORK，勿用 $HOME）----
 export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-${WORK}/.apptainer_cache}"
 HOST_FAKE_ROOT_SRV="${APPTAINER_FAKE_ROOT:-${WORK}/.apptainer_fake_root_server}"
-HOST_HF="${HF_CACHE_DIR:-${WORK}/.cache/huggingface}"          # server 端 DistilBERT tokenizer 下载/缓存
+HOST_HF="${HF_CACHE_DIR:-${WORK}/huggingface}"          # server 端 DistilBERT tokenizer 下载/缓存
 HOST_CKPT_DIR="$(cd "$(dirname "$CKPT")" && pwd)"; CKPT_NAME="$(basename "$CKPT")"
 HOST_EVAL_LOGS="${EVAL_LOGS_DIR:-${PROJECT_ROOT}/eval_logs}"   # 评测日志/结果落盘（持久）
 HOST_TMPDIR="${TMPDIR:-/tmp}"

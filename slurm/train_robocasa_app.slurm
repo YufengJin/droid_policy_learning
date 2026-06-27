@@ -54,10 +54,10 @@ export nointeractive=yes
 ################################################################################
 SCRIPT_SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${SLURM_SUBMIT_DIR:-$(cd "${SCRIPT_SLURM_DIR}/.." && pwd)}"
-WORK_DIR="${WORK_DIR:-/home/hpc/g108ea/g108ea10/repos/droid_policy_learning}"
+WORK_DIR="${WORK_DIR:-/home/hpc/g108ea/g108ea10/vault/vla-wam/droid_policy_learning}"
 PROJECT_ROOT="${DROID_PROJECT_DIR:-$WORK_DIR}"
 OUTPUT_DIR="${PROJECT_ROOT}/outputs"
-DATA_ROOT="${ROBOCASA_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/robocasa}"
+DATA_ROOT="${ROBOCASA_DATASET_DIR:-/home/hpc/g108ea/g108ea10/atuin/datasets/robocasa}"
 ROBOCASA_SUBDIR="${ROBOCASA_SUBDIR:-v0.1/multi_stage}"
 
 if [[ ! -d "$DATA_ROOT" ]]; then
@@ -80,7 +80,7 @@ CONTAINER_IMAGE="${APPTAINER_IMAGE:-${WORK:-$PROJECT_ROOT}/sif/droid.sif}"
 HOST_CODE_DIR="${DROID_PROJECT_DIR:-$PROJECT_ROOT}"
 HOST_FAKE_ROOT="${APPTAINER_FAKE_ROOT:-${WORK:-$HOME}/.apptainer_fake_root}"
 HOST_TMPDIR="${TMPDIR:-/tmp}"
-HOST_HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}"
+HOST_HF_CACHE="${HF_HOME:-$HOME/atuin/huggingface}"
 
 CONT_CODE_DIR="/workspace/droid_policy_learning"
 CONT_ROBOCASA="/workspace/datasets/robocasa"

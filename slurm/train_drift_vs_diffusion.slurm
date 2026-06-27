@@ -89,13 +89,13 @@ echo "[INFO] Experiment: dataset=${DATASET} algo=${ALGO} seed=${SEED} epochs=${N
 ################################################################################
 SCRIPT_SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${SLURM_SUBMIT_DIR:-$(cd "${SCRIPT_SLURM_DIR}/.." && pwd)}"
-WORK_DIR="${WORK_DIR:-/home/hpc/g108ea/g108ea10/repos/droid_policy_learning}"
+WORK_DIR="${WORK_DIR:-/home/hpc/g108ea/g108ea10/vault/vla-wam/droid_policy_learning}"
 PROJECT_ROOT="${DROID_PROJECT_DIR:-$WORK_DIR}"
 OUTPUT_DIR="${PROJECT_ROOT}/outputs"
 
 # 数据集主机路径（子目录可与 train_*_app 对齐覆盖）
-LIBERO_HOST_ROOT="${LIBERO_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/libero}"
-ROBOCASA_HOST_ROOT="${ROBOCASA_DATASET_DIR:-/home/atuin/g108ea/g108ea10/datasets/robocasa}"
+LIBERO_HOST_ROOT="${LIBERO_DATASET_DIR:-/home/hpc/g108ea/g108ea10/atuin/datasets/libero}"
+ROBOCASA_HOST_ROOT="${ROBOCASA_DATASET_DIR:-/home/hpc/g108ea/g108ea10/atuin/datasets/robocasa}"
 LIBERO_SUBDIR="${LIBERO_SUBDIR:-libero_10}"
 ROBOCASA_SUBDIR="${ROBOCASA_SUBDIR:-v0.1/single_stage/kitchen_pnp}"
 
@@ -119,7 +119,7 @@ CONTAINER_IMAGE="${APPTAINER_IMAGE:-${WORK:-$PROJECT_ROOT}/sif/droid.sif}"
 HOST_CODE_DIR="${DROID_PROJECT_DIR:-$PROJECT_ROOT}"
 HOST_FAKE_ROOT="${APPTAINER_FAKE_ROOT:-${WORK:-$HOME}/.apptainer_fake_root}"
 HOST_TMPDIR="${TMPDIR:-/tmp}"
-HOST_HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}"
+HOST_HF_CACHE="${HF_HOME:-$HOME/atuin/huggingface}"
 
 if [[ ! -f "$CONTAINER_IMAGE" ]]; then
     echo "[ERR] Container image not found: $CONTAINER_IMAGE"
