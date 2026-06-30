@@ -7,7 +7,8 @@ slurm/
 ├── train_libero_app.slurm          # 训练：LIBERO（4×A100，multirun drift+diffusion）
 ├── train_robocasa_app.slurm        # 训练：RoboCasa
 ├── train_droid_app.slurm           # 训练：DROID（RLDS）
-├── eval_app.slurm                  # 评测：跨容器 client/server（libero 或 robocasa）
+├── eval_app.slurm                  # 评测：跨容器 client/server（libero 或 robocasa），跑完回写 wandb
+├── test_wandb_log.slurm            # 隔离测试：拿已有 eval 结果目录 + ckpt 回写 wandb（不跑仿真）
 ├── train_drift_vs_diffusion.slurm  # 实验：array job，2 数据×2 算法×3 seed = 12（见 drift_vs_diffusion_exp.md）
 ├── train_action_space_comparison.slurm # 实验：array job，2 数据×3 动作空间×3 seed = 18（见 action_space_exp.md）
 ├── patches/                        # 评测用的 websocket server/client 补丁（关 keepalive ping）
@@ -234,18 +235,22 @@ ROBOCASA_SUBDIR=v0.1/single_stage/kitchen_pnp/PnPSinkToCounter \
 
 ## 5. 评测(`eval_app.slurm`,跨容器)
 
-`#SBATCH --partition=a100 --gres=gpu:1 --time=04:00:00`。同节点起 server(droid.sif)+ client(bench.sif),跑完 trap 清理(杀 server、删 overlay)。结果落 `$PROJECT_ROOT/eval_logs/<TASK>--<ts>/eval.log`。
+`#SBATCH --partition=a100 --gres=gpu:1 --time=04:00:00`。同节点起 server(droid.sif)+ client(bench.sif),跑完 trap 清理(杀 server、删 overlay)。结果落 **`$PROJECT_ROOT/eval_logs/<JOBID>/<TASK>--<ts>/`**(含 `eval.log` + `results.json`;`<JOBID>` 子目录避免并发 job 抢同一目录)。跑完会自动把成功率回写到该 ckpt 训练时的 wandb run(见 §5.1)。
 
-### 提交(⚠️ 两个必带项见下)
+> ⚠️ **train/eval 任务必须一致**:eval 的任务要和 ckpt 训练用的数据对应。
+> - **libero**:训练用 `libero_10` → eval `TASK_SUITE=libero_10`(脚本默认即此,无需改)。
+> - **robocasa**:eval `TASK=` 必须是该 ckpt 训练的那个单任务。本仓 modality 消融的 robocasa ckpt 训练于 **`PnPSinkToCounter`**,故须显式 `TASK=PnPSinkToCounter`(脚本默认 `PnPCounterToCab` 与之不符,会评错任务)。
+
+### 提交
 ```bash
 cd $REPO
-# robocasa（最快，单任务）
-RC_CKPT=$(ls -t $WORK/test_outputs/diffusion_policy_demo_im128_*/*/models/model_epoch_3.pth | head -1)
-sbatch --export=ALL,DROID_PROJECT_DIR=$REPO,WORK=$WORK,BENCHMARK=robocasa,CKPT=$RC_CKPT,NUM_TRIALS=1 slurm/eval_app.slurm
+# robocasa（单任务；TASK 必须 = 训练任务）
+RC_CKPT=$REPO/outputs/robocasa_with_proprio/<ts>/models/model_best.pth
+sbatch --export=ALL,BENCHMARK=robocasa,CKPT=$RC_CKPT,TASK=PnPSinkToCounter,NUM_TRIALS=5 slurm/eval_app.slurm
 
 # libero（跑完 libero_10 全 10 任务；NUM_TRIALS=每任务次数）
-LB_CKPT=$(ls -t $WORK/test_outputs/diffusion_policy_*libero*/*/models/model_epoch_3.pth | head -1)
-sbatch --export=ALL,DROID_PROJECT_DIR=$REPO,WORK=$WORK,BENCHMARK=libero,CKPT=$LB_CKPT,NUM_TRIALS=1,PORT=8770 slurm/eval_app.slurm
+LB_CKPT=$REPO/outputs/libero10_with_proprio/<ts>/models/model_best.pth
+sbatch --export=ALL,BENCHMARK=libero,CKPT=$LB_CKPT,TASK_SUITE=libero_10,NUM_TRIALS=20,PORT=8770 slurm/eval_app.slurm
 ```
 
 ### 必传 / 可覆盖变量
@@ -254,23 +259,36 @@ sbatch --export=ALL,DROID_PROJECT_DIR=$REPO,WORK=$WORK,BENCHMARK=libero,CKPT=$LB
 |---|---|---|
 | `BENCHMARK` | (必填) | `libero` 或 `robocasa` |
 | `CKPT` | (必填) | 宿主机 `.pth` 绝对路径 |
-| **`DROID_PROJECT_DIR`** | `$SCRIPT_DIR/..` | **必传 `=$REPO`**(原因见下 ④c) |
-| **`WORK`** | (必须可见) | sif 目录 `$WORK/sif`;建议显式 `WORK=$WORK` |
+| `DROID_PROJECT_DIR` | `SLURM_SUBMIT_DIR` → 硬编码 $REPO | 代码/输出根。**从 $REPO 提交时无需传**(脚本已按 submit dir 兜底,见 ④c 已修);仅当从别处提交或想换根目录时才设。 |
+| `WORK` | (继承自登陆环境) | sif 目录 `$WORK/sif`;`--export=ALL` 会带入,一般无需显式传 |
 | `PORT` | 8765 | server/client 端口。**并发跑两个 eval 时务必错开**(见 ④e) |
 | `NUM_TRIALS` | libero 20 / robocasa 5 | libero=每任务次数(`--num_trials_per_task`);robocasa=总次数 |
 | `TASK_SUITE` | libero_10 | (libero)任务套件 |
-| `TASK` | PnPCounterToCab | (robocasa)单任务名 |
-| `EVAL_LOGS_DIR` | `$PROJECT_ROOT/eval_logs` | 结果落盘 |
+| `TASK` | PnPCounterToCab | (robocasa)单任务名 —— **务必改成 ckpt 训练用的任务**(本仓为 `PnPSinkToCounter`) |
+| `LIBERO_REPO`/`ROBOCASA_REPO` | `$REPO/../{LIBERO,robocasa}` | sibling client 仓库;用于 bind 覆盖镜像内旧 `run_eval.py`(见 §5.1) |
+| `EVAL_LOGS_DIR` | `$PROJECT_ROOT/eval_logs` | 结果落盘根 |
 | `DROID_SIF`/`BENCH_SIF`/`SIF_DIR` | `$WORK/sif/*` | 换镜像 |
 
 ### 查结果 & 通过标准
 ```bash
-tail -f $REPO/logs/<jobid>.out          # 主日志
-cat $REPO/logs/<jobid>_server.log       # server 端日志
+tail -f $REPO/logs/<jobid>.out                                   # 主日志
+cat    $REPO/logs/<jobid>_server.log                             # server 端日志
+cat    $REPO/eval_logs/<jobid>/<TASK>--<ts>/results.json         # 机器可读成功率
 ```
 日志依次出现即为**链路通**:
-`[INFO] server ready` → `Connecting to policy server at ws://localhost:<PORT>` → `Evaluating task: …` → `Episode N: …(length=…)` → `Total episodes` → `评测完成`。
-> 成功率 0% 属预期(只验链路,不看效果)。**实测通过(2026-06-29)**:robocasa job 3794844(`eval_logs/PnPCounterToCab--20260629_102937`)、libero job 3794910(`eval_logs/libero_10--20260629_103731`,10 任务)。
+`[INFO] server ready` → `Connecting to policy server at ws://localhost:<PORT>` → `Evaluating task: …` → `Episode N: …(length=…)` → `Total episodes` → `Results JSON: …` → `评测完成` → `[log_eval_to_wandb] 已写入 …`。
+> 成功率 0% 不一定是 bug:链路通(每集跑满、动作数值正常)而成功率低,多为模型欠训练。**实测链路通**:2026-06-29 robocasa job 3794844 / libero job 3794910;2026-06-30 robocasa `PnPSinkToCounter`(job 3799504,wandb 回写到 run `6i5o3rql`)、libero `libero_10`(job 3799439),两者冒烟均 0%(epoch77/epoch92 轻量 ckpt,属模型质量)。
+
+### 5.1 评测结果回写 wandb(同一个训练 run)
+
+跑完评测后,脚本(step 7)在 **droid.sif** 内跑 `robomimic.scripts.log_eval_to_wandb`,把成功率 append 到该 ckpt 训练时的同一个 wandb run(`eval/success_rate`、`eval/num_success`、`eval/num_episodes`,以 `eval/epoch` 为 x 轴;robocasa 单值、libero 另含 `eval/avg_task_success_rate` 与 per-task)。
+
+机制(解耦评测下为何这样设计):成功率在 **client**(libero/robocasa.sif,无 wandb)算出 → 写 `results.json`;`wandb_run_id`/project 存在 **ckpt** 里、只有 droid.sif 有 wandb+key,故由 droid.sif 读 ckpt + `results.json` 用 `wandb.init(id=run_id, resume="allow")` 回写。**无需改 websocket 协议,client 容器也无需装 wandb**。
+
+- **前提**:① ckpt 是开 wandb 训出来的(含 `wandb_run_id`);② `$REPO/slurm/.env.wandb` 有 key(脚本会 `source` 并透传)。任一缺失 → logger 打印「跳过 wandb 回写」并 `exit 0`,**不影响评测结果**。
+- `results.json` 由两个 client 仓的 `scripts/run_eval.py` 写出;镜像内是 build 时旧版(不写 json),脚本用 `LIBERO_REPO`/`ROBOCASA_REPO` 的最新 `run_eval.py` **bind 覆盖**镜像内副本来产出(重建 sif 后可去掉此 bind)。若 bind 缺失 → logger 回退解析 `eval.log`(无 per-task)。
+- 隔离测试 logger(不跑仿真,直接拿一个已有 run 目录 + ckpt 回写):`sbatch --export=ALL,CKPT=<abs.pth>,RUN_DIR=<eval_logs/.../任务--ts> slurm/test_wandb_log.slurm`。
+- logger 在 CWD 写本地 `wandb/` 元数据,已 `.gitignore`。
 
 ---
 
@@ -299,9 +317,9 @@ action_space:`ID = dataset_idx*9 + space_idx*3 + seed_idx`,space=[pos_euler,pos_
 | 训练 ckpt(周期) | `$PROJECT_ROOT/outputs/<exp>/<ts>/models/model_epoch_N.pth` —— **每 ~1h 存一个**(按 `every_n_seconds=3600`),累积;含 `wandb_run_id`/`optimizer`/`epoch`,可 resume |
 | 训练 ckpt(最优) | `.../models/model_best.pth` —— **单个、覆盖式**(验证 loss / rollout 成功率创新高时重写;无验证的 run 不产生)。2026-06-30 起 3 个 train 脚本统一此行为(不再累积 `model_epoch_N_best_validation_*.pth`) |
 | 训练日志(作业) | `$REPO/logs/<jobid>.out` / `.err`;array 为 `<jobid>_<arrayid>` |
-| 评测结果 | `$PROJECT_ROOT/eval_logs/<TASK>--<ts>/eval.log` |
+| 评测结果 | `$PROJECT_ROOT/eval_logs/<jobid>/<TASK>--<ts>/{eval.log, results.json}`(`results.json` 机器可读,供回写 wandb) |
 | 评测 server 日志 | `$REPO/logs/<jobid>_server.log` |
-| wandb(在线) | `https://wandb.ai/yufeng-jin/<wandb_proj_name>/runs/<id>` |
+| wandb(在线) | `https://wandb.ai/yufeng-jin/<wandb_proj_name>/runs/<id>`;评测 `eval/*` 指标回写到 ckpt 训练的同一 run(见 §5.1) |
 
 ---
 
@@ -313,7 +331,7 @@ action_space:`ID = dataset_idx*9 + space_idx*3 + seed_idx`,space=[pos_euler,pos_
 | `Read-only file system` | sif 只读;训练/server 已带 `--writable-tmpfs`,client 用 overlay(脚本已处理)。 |
 | `Permission denied: …/huggingface` | 用 `HF_HOME=/hf` + bind 可写目录(脚本已处理),确认 `$WORK/huggingface` 可写。 |
 | wandb / HF 下载卡住 | 代理没透传进容器。见 §2;临时关 wandb:`experiment.logging.log_wandb=false`。 |
-| **④c** 评测秒退 `mkdir …/var/tmp/slurmd_spool/eval_logs: Permission denied` | slurm 在 spool 跑脚本副本,`BASH_SOURCE`→spool 使 `PROJECT_ROOT` 算错。**提交时加 `DROID_PROJECT_DIR=$REPO,WORK=$WORK`**。 |
+| **④c** 评测秒退 `mkdir …/var/tmp/slurmd_spool/eval_logs: Permission denied` | slurm 在 spool 跑脚本副本,`BASH_SOURCE`→spool 使 `PROJECT_ROOT` 算错。**已修(2026-06-30)**:`eval_app.slurm` 改用 `DROID_PROJECT_DIR > SLURM_SUBMIT_DIR > 硬编码 $REPO` 兜底并 `cd` 进去。从 $REPO 提交即可,无需再传 `DROID_PROJECT_DIR`;从别处提交则显式传它。 |
 | **④d** libero client `TypeError: create_connection() got an unexpected keyword argument 'ping_interval'` | `patches/websocket_client.py` 的 `ping_interval` 只在 websockets≥16(robocasa)是 connect() 形参;libero 是 13.1。**已修**:按 `inspect.signature` 条件传入。 |
 | **④e** 评测 `端口 8765 被占用`,server 进程退出 | 两个 eval 作业被调到同一节点、server 都绑 8765。**并发跑给不同 `PORT`**(如 8765/8770)或串行。 |
 | wandb resume 没接上同一 run | 确认被 resume 的 ckpt 是开 wandb 训的(含 `wandb_run_id`),且传了 `experiment.resume=true`。aloha 暂不支持。 |
@@ -336,6 +354,10 @@ salloc --partition=a100 --gres=gpu:4 --constraint=a100_80 --cpus-per-task=8 --ti
 EXP_NAME=libero10_with_proprio bash slurm/train_libero_app.slurm
 # resume（Hydra 覆盖）
 ... experiment.ckpt_path=<.pth> experiment.resume=true
-# 评测（必带 DROID_PROJECT_DIR / WORK；并发错开 PORT）
-sbatch --export=ALL,DROID_PROJECT_DIR=$REPO,WORK=$WORK,BENCHMARK=<libero|robocasa>,CKPT=<abs.pth>,NUM_TRIALS=1[,PORT=8770] slurm/eval_app.slurm
+# 评测（从 $REPO 提交即可；robocasa 必带正确 TASK；并发错开 PORT；跑完自动回写 wandb）
+cd $REPO
+sbatch --export=ALL,BENCHMARK=robocasa,CKPT=<abs.pth>,TASK=PnPSinkToCounter,NUM_TRIALS=5            slurm/eval_app.slurm
+sbatch --export=ALL,BENCHMARK=libero,CKPT=<abs.pth>,TASK_SUITE=libero_10,NUM_TRIALS=20,PORT=8770    slurm/eval_app.slurm
+# 隔离测试 eval→wandb 回写（不跑仿真）
+sbatch --export=ALL,CKPT=<abs.pth>,RUN_DIR=<eval_logs/<jobid>/任务--ts> slurm/test_wandb_log.slurm
 ```

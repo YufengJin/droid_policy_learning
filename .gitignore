@@ -39,6 +39,7 @@ build/
 outputs/
 logs/
 *.sif
+wandb/
 
 .claude/
 

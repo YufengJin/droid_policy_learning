@@ -42,8 +42,14 @@ CKPT="${CKPT:?必须指定 CKPT=宿主机上的 model_epoch_N.pth 绝对路径}"
 PORT="${PORT:-8765}"
 [[ -f "$CKPT" ]] || { echo "[ERR] ckpt 不存在: $CKPT"; exit 2; }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="${DROID_PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# PROJECT_ROOT 解析：sbatch 下脚本被拷到节点 spool（/var/tmp/slurmd_spool/...），BASH_SOURCE
+#   不再指向仓库内，dirname 推导会得到 spool 目录（eval_logs mkdir 会 Permission denied）。
+#   优先级：DROID_PROJECT_DIR > SLURM_SUBMIT_DIR（从仓库根提交即仓库根）> 硬编码默认
+#   （与 train_*_app.slurm 一致）。
+DEFAULT_PROJECT_ROOT="/home/hpc/g108ea/g108ea10/vault/vla-wam/droid_policy_learning"
+PROJECT_ROOT="${DROID_PROJECT_DIR:-${SLURM_SUBMIT_DIR:-$DEFAULT_PROJECT_ROOT}}"
+[[ -d "$PROJECT_ROOT" ]] || { echo "[ERR] PROJECT_ROOT 不存在: $PROJECT_ROOT（用 DROID_PROJECT_DIR 覆盖）"; exit 2; }
+cd "$PROJECT_ROOT"; mkdir -p logs   # 让 logs/ 等相对路径与 PROJECT_ROOT 一致
 SIF_DIR="${SIF_DIR:-${WORK:?未设 \$WORK}/sif}"
 DROID_SIF="${DROID_SIF:-$SIF_DIR/droid.sif}"
 BENCH_SIF="${BENCH_SIF:-$SIF_DIR/${BENCHMARK}.sif}"
@@ -114,6 +120,20 @@ EVAL_OVERLAY="${HOST_TMPDIR}/eval_overlay_${SLURM_JOB_ID:-$$}.img"
 apptainer overlay create --size 4096 "$EVAL_OVERLAY" >/dev/null 2>&1 || { echo "[ERR] 建 overlay 失败"; exit 1; }
 trap 'kill $SRV_PID 2>/dev/null || true; rm -f "$EVAL_OVERLAY" 2>/dev/null || true' EXIT
 echo "[INFO] 起 ${BENCHMARK} sim client，连 localhost:$PORT（overlay=$EVAL_OVERLAY）"
+
+# run_eval.py 覆盖绑定：镜像内烤入的 run_eval 是 build 时的旧版（不写 results.json）。
+#   把宿主 sibling repo 里的最新版 bind 覆盖，使其额外产出 results.json（供后面回写 wandb）。
+#   重建 sif 后可去掉此 bind。文件不在就跳过（logger 会回退解析 eval.log）。
+VLA_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
+RUN_EVAL_BIND=()
+if [[ "$BENCHMARK" == "libero" ]]; then
+  _re="${LIBERO_REPO:-$VLA_ROOT/LIBERO}/scripts/run_eval.py"
+  [[ -f "$_re" ]] && RUN_EVAL_BIND=(-B "${_re}:/workspace/libero/scripts/run_eval.py:ro")
+elif [[ "$BENCHMARK" == "robocasa" ]]; then
+  _re="${ROBOCASA_REPO:-$VLA_ROOT/robocasa}/scripts/run_eval.py"
+  [[ -f "$_re" ]] && RUN_EVAL_BIND=(-B "${_re}:/workspace/robocasa/scripts/run_eval.py:ro")
+fi
+
 if [[ "$BENCHMARK" == "libero" ]]; then
   SUITE="${TASK_SUITE:-libero_10}"; NTRIALS="${NUM_TRIALS:-20}"
   DATA_BIND=(); [[ -d "$LIBERO_DATA" ]] && DATA_BIND=(-B "${LIBERO_DATA}:/workspace/libero/datasets:ro")
@@ -121,24 +141,49 @@ if [[ "$BENCHMARK" == "libero" ]]; then
     --env LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu \
     --env NUMBA_CACHE_DIR=/tmp/numba_cache --env XDG_CACHE_HOME=/tmp/xdg_cache \
     -B "${PROJECT_ROOT}/slurm/patches/websocket_client.py:/opt/venv/lib/python3.8/site-packages/policy_websocket/websocket_client.py:ro" \
+    "${RUN_EVAL_BIND[@]}" \
     -B "${HOST_EVAL_LOGS}:/eval_logs" -B "${HOST_TMPDIR}:/tmp" "${DATA_BIND[@]}" \
     "$BENCH_SIF" \
     bash -lc "cd /workspace/libero && python scripts/run_eval.py \
       --task_suite_name '${SUITE}' --policy_server_addr localhost:${PORT} \
-      --num_trials_per_task '${NTRIALS}' --log_dir /eval_logs"
+      --num_trials_per_task '${NTRIALS}' --log_dir /eval_logs/${SLURM_JOB_ID:-local}"
 elif [[ "$BENCHMARK" == "robocasa" ]]; then
   TASK="${TASK:-PnPCounterToCab}"; NTRIALS="${NUM_TRIALS:-5}"
   apptainer run --overlay "$EVAL_OVERLAY" --env MUJOCO_GL=osmesa \
     --env LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu \
     --env NUMBA_CACHE_DIR=/tmp/numba_cache --env XDG_CACHE_HOME=/tmp/xdg_cache \
     -B "${PROJECT_ROOT}/slurm/patches/websocket_client.py:/opt/venv/lib/python3.10/site-packages/policy_websocket/websocket_client.py:ro" \
+    "${RUN_EVAL_BIND[@]}" \
     -B "${HOST_EVAL_LOGS}:/eval_logs" -B "${HOST_TMPDIR}:/tmp" \
     "$BENCH_SIF" \
     bash -lc "cd /workspace/robocasa && python scripts/run_eval.py \
       --task_name '${TASK}' --policy_server_addr localhost:${PORT} \
-      --num_trials '${NTRIALS}' --no_save_video --log_dir /eval_logs"
+      --num_trials '${NTRIALS}' --no_save_video --log_dir /eval_logs/${SLURM_JOB_ID:-local}"
 else
   echo "[ERR] 未知 BENCHMARK=$BENCHMARK（应为 libero / robocasa）"; exit 2
 fi
 
 echo "[INFO] 评测完成 $(date +'%F %T')；日志在 $HOST_EVAL_LOGS"
+
+# ---- 7) 回写 wandb：用 ckpt 里的 wandb_run_id resume 训练那个 run，append eval/* 指标 ----
+# 在 droid.sif 内跑（装了 wandb + macros + API key）。找本次评测最新的 run 目录传给 logger。
+# 整步非致命：失败不影响评测作业的退出码（logger 自身对无 run_id/无网也是 exit 0）。
+RUN_DIR_HOST="$(ls -dt ${HOST_EVAL_LOGS}/${SLURM_JOB_ID:-local}/*/ 2>/dev/null | head -1)"
+if [[ -n "$RUN_DIR_HOST" ]]; then
+  RUN_DIR_NAME="$(basename "$RUN_DIR_HOST")"
+  echo "[INFO] 回写 wandb：run_dir=$RUN_DIR_NAME ckpt=$CKPT_NAME"
+  apptainer run --writable-tmpfs \
+    --env LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu \
+    --env HF_HOME=/hf_cache \
+    -B "${HOST_CKPT_DIR}:/ckpts:ro" \
+    -B "${HOST_FAKE_ROOT_SRV}:/root" \
+    -B "${HOST_HF}:/hf_cache" \
+    -B "${HOST_EVAL_LOGS}:/eval_logs" \
+    -B "${HOST_TMPDIR}:/tmp" \
+    "$DROID_SIF" \
+    python -m robomimic.scripts.log_eval_to_wandb \
+      --ckpt "/ckpts/${CKPT_NAME}" --run-dir "/eval_logs/${SLURM_JOB_ID:-local}/${RUN_DIR_NAME}" \
+    || echo "[WARN] wandb 回写失败（不影响评测结果）"
+else
+  echo "[WARN] 未找到评测 run 目录，跳过 wandb 回写"
+fi
