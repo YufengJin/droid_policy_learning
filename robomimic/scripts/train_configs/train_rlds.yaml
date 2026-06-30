@@ -66,10 +66,8 @@ experiment:
   # 模型保存配置
   save:
     enabled: true           # 是否启用模型保存
-    every_n_seconds: null  # 每 N 秒保存一次 (null 表示禁用)
-                           # 在 train.py:346-347 中检查
-    every_n_epochs: 50      # 每 N 个 epoch 保存一次
-                           # 在 train.py:348-349 中检查: epoch % every_n_epochs == 0
+    every_n_seconds: 3600   # ~每 1 小时保存一个周期 ckpt（model_epoch_N.pth，累积）
+    every_n_epochs: null    # 关闭按 epoch 计数保存，改为按时间
     epochs: []             # 指定要保存的 epoch 列表
                            # 在 train.py:350 中检查: epoch in epochs
     on_best_validation: false           # 达到最佳验证损失时是否保存

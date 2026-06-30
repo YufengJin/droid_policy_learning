@@ -57,8 +57,8 @@ experiment:
 
   save:
     enabled: true
-    every_n_seconds: null
-    every_n_epochs: 50
+    every_n_seconds: 3600   # ~每 1 小时保存一次（A100-80 优化：避免过于频繁写 ckpt）
+    every_n_epochs: null     # 关闭按 epoch 计数保存，改为按时间
     epochs: []
     on_best_validation: true
     on_best_rollout_return: false
@@ -132,8 +132,9 @@ train:
 
   # 训练超参数
   cuda: true
-  batch_size: 64              # 每 GPU 的 batch size
-                               # 有效 batch_size = batch_size * nproc_per_node
+  # A100-80GB 实测：BS=448/GPU 仍可跑(76GB)，320/GPU(~55GB)留约 24GB 余量为稳定首选。
+  # 每 GPU 的 batch size；有效 batch_size = batch_size * nproc_per_node(4) = 1280。slurm 脚本会再次覆盖。
+  batch_size: 320
   num_epochs: 100000
   seed: 1
 
@@ -210,10 +211,11 @@ observation:
 
   modalities:
     obs:
-      # low_dim:
-      #   - robot0_eef_pos            # 末端执行器位置 (3D)
-      #   - robot0_eef_quat           # 末端执行器四元数 (4D)
-      #   - robot0_gripper_qpos       # 夹爪位置 (2D)
+      # 默认无 proprio（空列表）。需带本体时由 slurm 用 ROBOCASA_LOW_DIM 覆盖为
+      #   [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]（9D）。
+      # ⚠️ 此 key 必须存在（即使为 []），否则 Hydra struct 模式下 override
+      #    observation.modalities.obs.low_dim=[...] 会报 "Key 'low_dim' is not in struct"。
+      low_dim: []
       rgb:
         # ------------------------------------------------------------------
         # RGB 图像输入：支持 1~3 张图片，按需取消注释即可

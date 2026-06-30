@@ -601,6 +601,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         # -------------------------------------------------------------------
         epoch_ckpt_name = "model_epoch_{}".format(epoch)
         should_save_ckpt = False
+        save_best = False   # 触发“最优模型”单文件覆盖保存（model_best.pth）
         ckpt_reason = None
         if config.experiment.save.enabled:
             time_check = (
@@ -652,9 +653,7 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
                 if "Loss" in step_log_v and (best_valid_loss is None or step_log_v["Loss"] <= best_valid_loss):
                     best_valid_loss = step_log_v["Loss"]
                     if config.experiment.save.on_best_validation:
-                        epoch_ckpt_name += "_best_validation_{}".format(best_valid_loss)
-                        should_save_ckpt = True
-                        ckpt_reason = "valid" if ckpt_reason is None else ckpt_reason
+                        save_best = True   # 仅保留单个 model_best.pth（覆盖），不按 epoch 累积
 
         # -------------------------------------------------------------------
         # MSE：从 train_loader 取一批，算预测动作与真实动作误差（参考 train_droid）
@@ -751,22 +750,29 @@ def train_robocasa(config, device, rank, world_size, local_rank, use_ddp, debug=
         # -------------------------------------------------------------------
         # 写 checkpoint（rank 0），含 optimizer/scheduler/epoch 供 resume
         # -------------------------------------------------------------------
-        if should_save_ckpt and is_main:
+        if is_main and (should_save_ckpt or save_best):
             model_to_save = unwrapped
-            TrainUtils.save_model(
-                model=model_to_save,
-                config=config,
-                env_meta=env_meta,
-                shape_meta=shape_meta,
-                ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
-                obs_normalization_stats=obs_normalization_stats,
-                action_normalization_stats=action_normalization_stats,
-                epoch=epoch,
-                best_valid_loss=best_valid_loss,
-                best_return=best_return,
-                best_success_rate=best_success_rate,
-                wandb_run_id=(data_logger.wandb_run_id if data_logger is not None else None),
-            )
+            # 周期 ckpt 按 epoch 累积（每 ~1h 一个）；best 只保留一个可覆盖的 model_best.pth
+            save_fnames = []
+            if should_save_ckpt:
+                save_fnames.append("model_epoch_{}.pth".format(epoch))
+            if save_best:
+                save_fnames.append("model_best.pth")
+            for _fname in save_fnames:
+                TrainUtils.save_model(
+                    model=model_to_save,
+                    config=config,
+                    env_meta=env_meta,
+                    shape_meta=shape_meta,
+                    ckpt_path=os.path.join(ckpt_dir, _fname),
+                    obs_normalization_stats=obs_normalization_stats,
+                    action_normalization_stats=action_normalization_stats,
+                    epoch=epoch,
+                    best_valid_loss=best_valid_loss,
+                    best_return=best_return,
+                    best_success_rate=best_success_rate,
+                    wandb_run_id=(data_logger.wandb_run_id if data_logger is not None else None),
+                )
 
         # -------------------------------------------------------------------
         # 内存占用记录（rank 0）

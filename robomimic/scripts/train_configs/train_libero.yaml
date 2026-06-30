@@ -48,8 +48,8 @@ experiment:
 
   save:
     enabled: true
-    every_n_seconds: null
-    every_n_epochs: 50
+    every_n_seconds: 3600   # ~每 1 小时保存一次（A100-80 优化：避免过于频繁写 ckpt）
+    every_n_epochs: null     # 关闭按 epoch 计数保存，改为按时间
     epochs: []
     on_best_validation: true
     on_best_rollout_return: false
@@ -112,7 +112,9 @@ train:
 
   # 训练超参数
   cuda: true
-  batch_size: 64
+  # A100-80GB 实测：BS=640/GPU 仍可跑(74GB)但余量过小；512/GPU(~60GB)留约 19GB 余量，稳定首选。
+  # 有效 batch = 512 * 4 GPU = 2048。slurm 脚本会再次覆盖此值。
+  batch_size: 512
   num_epochs: 100000
   seed: 1
 

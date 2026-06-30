@@ -3,7 +3,7 @@
 #SBATCH --partition=a100
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=8
-#SBATCH --constraint=a100_40
+#SBATCH --constraint=a100_80
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
@@ -90,6 +90,16 @@ BIND_ARGS="$BIND_ARGS -B ${DATA_ROOT}:${CONT_LIBERO}:ro"
 
 # wandb：-C 时需传入代理
 [[ -n "${http_proxy:-}" ]] && export APPTAINERENV_http_proxy="${http_proxy}" APPTAINERENV_https_proxy="${https_proxy:-$http_proxy}"
+# wandb client<->service 走 localhost；http_proxy 下必须 bypass，否则 wandb.init 反复重试卡死（见 eval_app.slurm bug #3）
+export no_proxy="localhost,127.0.0.1" NO_PROXY="localhost,127.0.0.1"
+export APPTAINERENV_no_proxy="$no_proxy" APPTAINERENV_NO_PROXY="$NO_PROXY"
+
+# Alex 修复（见 eval_app.slurm bug #1/#4）：
+#  - GLIBC_2.34：apptainer 注入 host GL 库与容器旧 glibc 冲突 -> 容器库优先（cv2 import 否则崩）
+#  - 缓存 No space：--writable-tmpfs overlay 仅 16MiB -> 各类缓存重定向到 /tmp（绑定到大容量 host TMPDIR）
+APPTAINER_ENV_FIX="--env LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
+APPTAINER_ENV_FIX="$APPTAINER_ENV_FIX --env NUMBA_CACHE_DIR=/tmp/numba_cache --env XDG_CACHE_HOME=/tmp/xdg_cache --env MPLCONFIGDIR=/tmp/mpl"
+APPTAINER_ENV_FIX="$APPTAINER_ENV_FIX --env HF_HOME=${CONT_HF} --env TRANSFORMERS_CACHE=${CONT_HF}/hub"
 
 echo "[INFO] Apptainer bind mounts:"
 echo "  $HOST_CODE_DIR -> $CONT_CODE_DIR"
@@ -98,12 +108,13 @@ echo "  $DATA_ROOT -> $CONT_LIBERO (ro)"
 [ -d "$HOST_HF_CACHE" ] && echo "  $HOST_HF_CACHE -> $CONT_HF"
 
 ################################################################################
-# 6) 启动训练（顺序 multirun：drift_policy、diffusion_policy 各一轮）
-#    数据路径：/workspace/datasets/libero/${LIBERO_SUBDIR}（默认 libero_10）
-#    覆盖：LIBERO_MULTIRUN=0 LIBERO_ALGO=drift_policy sbatch ... （单算法）
+# 6) 启动训练（默认：单算法 diffusion_policy，一个 model 覆盖 libero_10 全部任务）
+#    数据路径：/workspace/datasets/libero/${LIBERO_SUBDIR}（默认 libero_10，含全部 10 个任务）
+#    覆盖：LIBERO_ALGO=drift_policy sbatch ...（换单算法）
+#         LIBERO_MULTIRUN=1 sbatch ...（恢复 drift_policy+diffusion_policy 双算法）
 ################################################################################
 CONT_LIBERO_SUB="${CONT_LIBERO}/${LIBERO_SUBDIR}"
-LIBERO_MULTIRUN="${LIBERO_MULTIRUN:-1}"
+LIBERO_MULTIRUN="${LIBERO_MULTIRUN:-0}"
 LIBERO_ALGOS="${LIBERO_ALGOS:-drift_policy diffusion_policy}"
 LIBERO_ALGO="${LIBERO_ALGO:-diffusion_policy}"
 
@@ -118,14 +129,32 @@ fi
 
 echo "[INFO] Starting LIBERO training at $(date +'%F %T') (MULTIRUN=$LIBERO_MULTIRUN: $ALGO_LIST, SUBDIR=$LIBERO_SUBDIR)"
 
+# 观测 modality 消融开关（robot_state vs vision-only）：
+#   LIBERO_LOW_DIM 未设置  -> 用 yaml 默认 low_dim=[robot_states]
+#   LIBERO_LOW_DIM=""(空串) -> low_dim=[]（去掉本体 proprio，纯视觉）
+#   LIBERO_LOW_DIM=robot_states -> 显式带 robot_states
+#   EXP_NAME 可覆盖 wandb/实验名，便于区分 4 个对比任务
+EXTRA_OVERRIDES=()
+if [[ -n "${LIBERO_LOW_DIM+x}" ]]; then
+  EXTRA_OVERRIDES+=("observation.modalities.obs.low_dim=[${LIBERO_LOW_DIM}]")
+fi
+if [[ -n "${EXP_NAME:-}" ]]; then
+  EXTRA_OVERRIDES+=("experiment.name=${EXP_NAME}")
+fi
+echo "[INFO] EXTRA_OVERRIDES=${EXTRA_OVERRIDES[*]:-<none>}"
+
+# A100-80GB 实测最优：512/GPU（~60GB，余量约 19GB）。可用 LIBERO_BATCH 覆盖。
+LIBERO_BATCH="${LIBERO_BATCH:-512}"
+
 for algo in $ALGO_LIST; do
   echo "[INFO] algo_name=$algo"
-  apptainer run --nv -C --writable-tmpfs --pwd "/workspace/droid_policy_learning" $BIND_ARGS "$CONTAINER_IMAGE" \
+  apptainer run --nv -C --writable-tmpfs $APPTAINER_ENV_FIX --pwd "/workspace/droid_policy_learning" $BIND_ARGS "$CONTAINER_IMAGE" \
     torchrun --nproc_per_node=4 -m robomimic.scripts.train_libero \
     "train.data=[{path: ${CONT_LIBERO_SUB}}]" \
     train.output_dir="/workspace/droid_policy_learning/outputs" \
-    train.batch_size=512 \
-    "algo_name=${algo}"
+    train.batch_size=${LIBERO_BATCH} \
+    "algo_name=${algo}" \
+    ${EXTRA_OVERRIDES[@]+"${EXTRA_OVERRIDES[@]}"}
   echo "[INFO] 完成 algo_name=$algo"
 done
 

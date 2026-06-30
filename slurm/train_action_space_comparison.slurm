@@ -135,6 +135,16 @@ BIND_ARGS="$BIND_ARGS -B ${HOST_TMPDIR}:/tmp"
 [ -d "$HOST_HF_CACHE" ] && BIND_ARGS="$BIND_ARGS -B ${HOST_HF_CACHE}:${CONT_HF}"
 
 [[ -n "${http_proxy:-}" ]] && export APPTAINERENV_http_proxy="${http_proxy}" APPTAINERENV_https_proxy="${https_proxy:-$http_proxy}"
+# wandb client<->service 走 localhost；http_proxy 下必须 bypass，否则 wandb.init 反复重试卡死（见 eval_app.slurm bug #3）
+export no_proxy="localhost,127.0.0.1" NO_PROXY="localhost,127.0.0.1"
+export APPTAINERENV_no_proxy="$no_proxy" APPTAINERENV_NO_PROXY="$NO_PROXY"
+
+# Alex 修复（见 eval_app.slurm bug #1/#4）：
+#  - GLIBC_2.34：apptainer 注入 host GL 库与容器旧 glibc 冲突 -> 容器库优先（cv2 import 否则崩）
+#  - 缓存 No space：--writable-tmpfs overlay 仅 16MiB -> 各类缓存重定向到 /tmp（绑定到大容量 host TMPDIR）
+APPTAINER_ENV_FIX="--env LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
+APPTAINER_ENV_FIX="$APPTAINER_ENV_FIX --env NUMBA_CACHE_DIR=/tmp/numba_cache --env XDG_CACHE_HOME=/tmp/xdg_cache --env MPLCONFIGDIR=/tmp/mpl"
+APPTAINER_ENV_FIX="$APPTAINER_ENV_FIX --env HF_HOME=${CONT_HF} --env TRANSFORMERS_CACHE=${CONT_HF}/hub"
 
 ################################################################################
 # 6) 按 dataset 分发训练
@@ -188,7 +198,7 @@ echo ""
 ################################################################################
 echo "[$(date +'%F %T')] Starting training: $EXP_NAME"
 
-apptainer run --nv -C --writable-tmpfs --pwd "$CONT_CODE_DIR" $BIND_ARGS "$CONTAINER_IMAGE" \
+apptainer run --nv -C --writable-tmpfs $APPTAINER_ENV_FIX --pwd "$CONT_CODE_DIR" $BIND_ARGS "$CONTAINER_IMAGE" \
     torchrun --nproc_per_node=4 -m "$TRAIN_MODULE" \
     "$DATA_ARG" \
     train.output_dir="${CONT_CODE_DIR}/outputs" \

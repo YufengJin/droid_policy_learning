@@ -442,6 +442,7 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
 
         epoch_ckpt_name = "model_epoch_{}".format(epoch)
         should_save_ckpt = False
+        save_best = False   # 触发“最优模型”单文件覆盖保存（model_best.pth）
         ckpt_reason = None
         if config.experiment.save.enabled:
             time_check = config.experiment.save.every_n_seconds is not None and (time.time() - last_ckpt_time > config.experiment.save.every_n_seconds)
@@ -473,9 +474,7 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
                 if "Loss" in step_log_v and (best_valid_loss is None or step_log_v["Loss"] <= best_valid_loss):
                     best_valid_loss = step_log_v["Loss"]
                     if config.experiment.save.on_best_validation:
-                        epoch_ckpt_name += "_best_validation_{}".format(best_valid_loss)
-                        should_save_ckpt = True
-                        ckpt_reason = "valid" if ckpt_reason is None else ckpt_reason
+                        save_best = True   # 仅保留单个 model_best.pth（覆盖），不按 epoch 累积
 
         # MSE evaluation
         if config.experiment.mse.enabled and is_main:
@@ -529,8 +528,15 @@ def train_libero(config, device, rank, world_size, local_rank, use_ddp, debug=Fa
                     print(json.dumps(mse_log, sort_keys=True, indent=4))
                 unwrapped.set_train()
 
-        if should_save_ckpt and is_main:
-            TrainUtils.save_model(model=unwrapped, config=config, env_meta=env_meta, shape_meta=shape_meta, ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"), obs_normalization_stats=obs_normalization_stats, action_normalization_stats=action_normalization_stats, epoch=epoch, best_valid_loss=best_valid_loss, wandb_run_id=(data_logger.wandb_run_id if data_logger is not None else None))
+        if is_main and (should_save_ckpt or save_best):
+            # 周期 ckpt 按 epoch 累积（每 ~1h 一个）；best 只保留一个可覆盖的 model_best.pth
+            save_fnames = []
+            if should_save_ckpt:
+                save_fnames.append("model_epoch_{}.pth".format(epoch))
+            if save_best:
+                save_fnames.append("model_best.pth")
+            for _fname in save_fnames:
+                TrainUtils.save_model(model=unwrapped, config=config, env_meta=env_meta, shape_meta=shape_meta, ckpt_path=os.path.join(ckpt_dir, _fname), obs_normalization_stats=obs_normalization_stats, action_normalization_stats=action_normalization_stats, epoch=epoch, best_valid_loss=best_valid_loss, wandb_run_id=(data_logger.wandb_run_id if data_logger is not None else None))
 
         if is_main:
             mem_usage = int(psutil.Process().memory_info().rss / 1000000)

@@ -368,6 +368,17 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
             env = EnvUtils.wrap_env_from_config(env, config=config)
             envs[env.name] = env
 
+    # ckpt 预加载（仅一次）：resume 时先取出 wandb_run_id，供 DataLogger 续接同一 run
+    ckpt_path = config.experiment.ckpt_path
+    resume = getattr(config.experiment, "resume", False)
+    ckpt_dict = None
+    resume_wandb_run_id = None
+    if ckpt_path is not None:
+        from robomimic.utils.file_utils import maybe_dict_from_checkpoint
+        ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
+        if resume:
+            resume_wandb_run_id = ckpt_dict.get("wandb_run_id", None)
+
     data_logger = None
     if is_main:
         data_logger = DataLogger(
@@ -375,6 +386,7 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
             config,
             log_tb=config.experiment.logging.log_tb,
             log_wandb=config.experiment.logging.log_wandb,
+            wandb_run_id=resume_wandb_run_id,
         )
         with open(os.path.join(log_dir, "..", "config.json"), "w") as f:
             json.dump(config, f, indent=4)
@@ -395,13 +407,9 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
     last_ckpt_time = time.time()
     start_epoch = 1
 
-    ckpt_path = config.experiment.ckpt_path
-    resume = getattr(config.experiment, "resume", False)
-    if ckpt_path is not None:
+    if ckpt_dict is not None:
         if is_main:
             print("LOADING MODEL WEIGHTS FROM " + ckpt_path)
-        from robomimic.utils.file_utils import maybe_dict_from_checkpoint
-        ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
         # Load into unwrapped algo; DDP wrap happens below so no .module here
         model.deserialize(ckpt_dict["model"])
         if resume and "epoch" in ckpt_dict and "optimizer" in ckpt_dict:
@@ -457,6 +465,7 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
 
         epoch_ckpt_name = "model_epoch_{}".format(epoch)
         should_save_ckpt = False
+        save_best = False   # 触发“最优模型”单文件覆盖保存（model_best.pth），validation 或 rollout 最优均归此
         ckpt_reason = None
         if config.experiment.save.enabled:
             time_check = (
@@ -502,9 +511,7 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
                 if "Loss" in step_log_v and (best_valid_loss is None or step_log_v["Loss"] <= best_valid_loss):
                     best_valid_loss = step_log_v["Loss"]
                     if config.experiment.save.on_best_validation:
-                        epoch_ckpt_name += "_best_validation_{}".format(best_valid_loss)
-                        should_save_ckpt = True
-                        ckpt_reason = "valid" if ckpt_reason is None else ckpt_reason
+                        save_best = True   # 仅保留单个 model_best.pth（覆盖），不按 epoch 累积
 
         video_paths = None
         rollout_check = (
@@ -553,11 +560,9 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
                 )
                 best_return = updated_stats["best_return"]
                 best_success_rate = updated_stats["best_success_rate"]
-                epoch_ckpt_name = updated_stats["epoch_ckpt_name"]
+                # rollout 触发的 best 也只写单个可覆盖的 model_best.pth（忽略带后缀的累积文件名）
                 if updated_stats["should_save_ckpt"]:
-                    should_save_ckpt = True
-                if updated_stats["ckpt_reason"] is not None:
-                    ckpt_reason = updated_stats["ckpt_reason"]
+                    save_best = True
 
         if ds_format == "droid_rlds" and rlds_batch is not None and config.experiment.mse.enabled and is_main:
             should_save_mse = (
@@ -612,7 +617,7 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
                 unwrapped.set_train()
 
         if is_main and video_paths and not (
-            (should_save_ckpt and ckpt_reason != "valid") or config.experiment.keep_all_videos
+            ((should_save_ckpt or save_best) and ckpt_reason != "valid") or config.experiment.keep_all_videos
         ):
             for env_name in video_paths:
                 try:
@@ -620,23 +625,31 @@ def train_ddp(config, device, rank, world_size, local_rank, use_ddp, debug=False
                 except Exception:
                     pass
 
-        if should_save_ckpt and is_main:
+        if is_main and (should_save_ckpt or save_best):
             # DDP: save unwrapped algo (model.module), not the DDP wrapper
             # Include optimizer, scheduler, epoch for full resume support
             model_to_save = unwrapped
-            TrainUtils.save_model(
-                model=model_to_save,
-                config=config,
-                env_meta=env_meta,
-                shape_meta=shape_meta,
-                ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
-                obs_normalization_stats=obs_normalization_stats,
-                action_normalization_stats=action_normalization_stats,
-                epoch=epoch,
-                best_valid_loss=best_valid_loss,
-                best_return=best_return,
-                best_success_rate=best_success_rate,
-            )
+            # 周期 ckpt 按 epoch 累积（每 ~1h 一个）；best 只保留一个可覆盖的 model_best.pth
+            save_fnames = []
+            if should_save_ckpt:
+                save_fnames.append("model_epoch_{}.pth".format(epoch))
+            if save_best:
+                save_fnames.append("model_best.pth")
+            for _fname in save_fnames:
+                TrainUtils.save_model(
+                    model=model_to_save,
+                    config=config,
+                    env_meta=env_meta,
+                    shape_meta=shape_meta,
+                    ckpt_path=os.path.join(ckpt_dir, _fname),
+                    obs_normalization_stats=obs_normalization_stats,
+                    action_normalization_stats=action_normalization_stats,
+                    epoch=epoch,
+                    best_valid_loss=best_valid_loss,
+                    best_return=best_return,
+                    best_success_rate=best_success_rate,
+                    wandb_run_id=(data_logger.wandb_run_id if data_logger is not None else None),
+                )
 
         if is_main:
             mem_usage = int(psutil.Process().memory_info().rss / 1000000)

@@ -3,7 +3,7 @@
 #SBATCH --partition=a100
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=8
-#SBATCH --constraint=a100_40
+#SBATCH --constraint=a100_80
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
@@ -39,10 +39,11 @@ export nointeractive=yes
 
 ################################################################################
 # 4) RoboCasa 数据路径（直接使用源目录，不复制到 TMPDIR）
-#    覆盖：ROBOCASA_DATASET_DIR；ROBOCASA_SUBDIR（子集路径，默认 v0.1/multi_stage）
+#    覆盖：ROBOCASA_DATASET_DIR；ROBOCASA_SUBDIR（子集路径，默认 v0.1/single_stage）
 #    可选 subtask 示例：
-#      v0.1/multi_stage          多阶段任务（默认）
-#      v0.1/single_stage         所有单阶段任务
+#      v0.1/single_stage         所有单阶段任务（默认，25 个任务，一个 model 全覆盖）
+#      v0.1/multi_stage          多阶段任务（5 个任务）
+#      v0.1                      single+multi 全部 30 个任务
 #      v0.1/single_stage/kitchen_coffee
 #      v0.1/single_stage/kitchen_doors
 #      v0.1/single_stage/kitchen_drawer
@@ -58,7 +59,7 @@ WORK_DIR="${WORK_DIR:-/home/hpc/g108ea/g108ea10/vault/vla-wam/droid_policy_learn
 PROJECT_ROOT="${DROID_PROJECT_DIR:-$WORK_DIR}"
 OUTPUT_DIR="${PROJECT_ROOT}/outputs"
 DATA_ROOT="${ROBOCASA_DATASET_DIR:-/home/hpc/g108ea/g108ea10/atuin/datasets/robocasa}"
-ROBOCASA_SUBDIR="${ROBOCASA_SUBDIR:-v0.1/multi_stage}"
+ROBOCASA_SUBDIR="${ROBOCASA_SUBDIR:-v0.1/single_stage}"
 
 if [[ ! -d "$DATA_ROOT" ]]; then
   echo "[ERR] RoboCasa dataset not found: $DATA_ROOT"; exit 2
@@ -106,6 +107,16 @@ BIND_ARGS="$BIND_ARGS -B ${DATA_ROOT}:${CONT_ROBOCASA}:ro"
 
 # wandb：-C 时需传入代理
 [[ -n "${http_proxy:-}" ]] && export APPTAINERENV_http_proxy="${http_proxy}" APPTAINERENV_https_proxy="${https_proxy:-$http_proxy}"
+# wandb client<->service 走 localhost；http_proxy 下必须 bypass，否则 wandb.init 反复重试卡死（见 eval_app.slurm bug #3）
+export no_proxy="localhost,127.0.0.1" NO_PROXY="localhost,127.0.0.1"
+export APPTAINERENV_no_proxy="$no_proxy" APPTAINERENV_NO_PROXY="$NO_PROXY"
+
+# Alex 修复（见 eval_app.slurm bug #1/#4）：
+#  - GLIBC_2.34：apptainer 注入 host GL 库与容器旧 glibc 冲突 -> 容器库优先（cv2 import 否则崩）
+#  - 缓存 No space：--writable-tmpfs overlay 仅 16MiB -> 各类缓存重定向到 /tmp（绑定到大容量 host TMPDIR）
+APPTAINER_ENV_FIX="--env LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
+APPTAINER_ENV_FIX="$APPTAINER_ENV_FIX --env NUMBA_CACHE_DIR=/tmp/numba_cache --env XDG_CACHE_HOME=/tmp/xdg_cache --env MPLCONFIGDIR=/tmp/mpl"
+APPTAINER_ENV_FIX="$APPTAINER_ENV_FIX --env HF_HOME=${CONT_HF} --env TRANSFORMERS_CACHE=${CONT_HF}/hub"
 
 echo "[INFO] Apptainer bind mounts:"
 echo "  $HOST_CODE_DIR -> $CONT_CODE_DIR"
@@ -114,12 +125,13 @@ echo "  $DATA_ROOT -> $CONT_ROBOCASA (ro)"
 [ -d "$HOST_HF_CACHE" ] && echo "  $HOST_HF_CACHE -> $CONT_HF"
 
 ################################################################################
-# 6) 启动训练（顺序 multirun：drift_policy、diffusion_policy 各一轮）
-#    数据路径：/workspace/datasets/robocasa/${ROBOCASA_SUBDIR}（默认 v0.1/multi_stage）
-#    覆盖：ROBOCASA_MULTIRUN=0 ROBOCASA_ALGO=drift_policy sbatch ... （单算法）
+# 6) 启动训练（默认：单算法 diffusion_policy，一个 model 覆盖 single_stage 全部任务）
+#    数据路径：/workspace/datasets/robocasa/${ROBOCASA_SUBDIR}（默认 v0.1/single_stage，25 个任务）
+#    覆盖：ROBOCASA_ALGO=drift_policy sbatch ...（换单算法）
+#         ROBOCASA_MULTIRUN=1 sbatch ...（恢复 drift_policy+diffusion_policy 双算法）
 ################################################################################
 CONT_ROBOCASA_SUB="${CONT_ROBOCASA}/${ROBOCASA_SUBDIR}"
-ROBOCASA_MULTIRUN="${ROBOCASA_MULTIRUN:-1}"
+ROBOCASA_MULTIRUN="${ROBOCASA_MULTIRUN:-0}"
 ROBOCASA_ALGOS="${ROBOCASA_ALGOS:-drift_policy diffusion_policy}"
 ROBOCASA_ALGO="${ROBOCASA_ALGO:-diffusion_policy}"
 
@@ -134,14 +146,45 @@ fi
 
 echo "[INFO] Starting RoboCasa training at $(date +'%F %T') (MULTIRUN=$ROBOCASA_MULTIRUN: $ALGO_LIST, SUBDIR=$ROBOCASA_SUBDIR)"
 
+# 观测 modality 消融开关（robot_state vs vision-only）：
+#   ROBOCASA_LOW_DIM 未设置  -> 用 yaml 默认 low_dim=[]（纯视觉+语言）
+#   ROBOCASA_LOW_DIM=robot_states -> 加入本体 proprio (9D)
+#   EXP_NAME 可覆盖 wandb/实验名，便于区分对比任务
+#
+# ⚠️ 数据规模 / RAM：RoboCasaDataset 会把所有图像 *eager-load 进 RAM*（每个 DDP rank
+#    各一份，忽略 hdf5_cache_mode）。单 task 的 mg 子集有 ~3000 demos，4 卡全量约 862GB
+#    -> 直接 OUT_OF_MEMORY。务必用 ROBOCASA_FILTER_KEY 限制 demo 数：
+#   ROBOCASA_FILTER_KEY=300_demos  -> 只取 300 个 demo（mask key，文件内有 10/50/100/.../3000_demos）
+#   ROBOCASA_VALIDATE=false        -> 关验证（mg 文件无 valid mask，开验证会再次全量加载 -> OOM；
+#                                     带验证只能用 human-demo 子集 .../<date>_2，含 train/valid mask）
+EXTRA_OVERRIDES=()
+if [[ -n "${ROBOCASA_LOW_DIM+x}" ]]; then
+  EXTRA_OVERRIDES+=("observation.modalities.obs.low_dim=[${ROBOCASA_LOW_DIM}]")
+fi
+if [[ -n "${ROBOCASA_FILTER_KEY:-}" ]]; then
+  EXTRA_OVERRIDES+=("train.hdf5_filter_key=${ROBOCASA_FILTER_KEY}")
+fi
+if [[ -n "${ROBOCASA_VALIDATE:-}" ]]; then
+  EXTRA_OVERRIDES+=("experiment.validate=${ROBOCASA_VALIDATE}")
+fi
+if [[ -n "${EXP_NAME:-}" ]]; then
+  EXTRA_OVERRIDES+=("experiment.name=${EXP_NAME}")
+fi
+echo "[INFO] EXTRA_OVERRIDES=${EXTRA_OVERRIDES[*]:-<none>}"
+
+# A100-80GB 实测：BS=448/GPU 仍可跑(76GB)但余量小；320/GPU(~55GB)留约 24GB 余量，稳定首选。
+# 有效 batch = 320 * 4 GPU = 1280。可用 ROBOCASA_BATCH 覆盖。
+ROBOCASA_BATCH="${ROBOCASA_BATCH:-320}"
+
 for algo in $ALGO_LIST; do
   echo "[INFO] algo_name=$algo"
-  apptainer run --nv -C --writable-tmpfs --pwd "/workspace/droid_policy_learning" $BIND_ARGS "$CONTAINER_IMAGE" \
+  apptainer run --nv -C --writable-tmpfs $APPTAINER_ENV_FIX --pwd "/workspace/droid_policy_learning" $BIND_ARGS "$CONTAINER_IMAGE" \
     torchrun --nproc_per_node=4 -m robomimic.scripts.train_robocasa \
     "train.data=[{path: ${CONT_ROBOCASA_SUB}}]" \
     train.output_dir="/workspace/droid_policy_learning/outputs" \
-    train.batch_size=128 \
-    "algo_name=${algo}"
+    train.batch_size=${ROBOCASA_BATCH} \
+    "algo_name=${algo}" \
+    ${EXTRA_OVERRIDES[@]+"${EXTRA_OVERRIDES[@]}"}
   echo "[INFO] 完成 algo_name=$algo"
 done
 
